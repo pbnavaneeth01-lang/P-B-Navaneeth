@@ -1,0 +1,62 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Basic user information.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Exam": {
+      "title": "Exam",
+      "description": "Defines an exam with its reference documents.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "questionPaperUrl": { "type": "string" },
+        "markingSchemeUrl": { "type": "string" },
+        "studentList": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "title", "questionPaperUrl", "markingSchemeUrl"]
+    },
+    "Submission": {
+      "title": "Submission",
+      "description": "A student's submission for an exam.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "examId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "bookletUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "evaluated"] },
+        "totalMarks": { "type": "number" },
+        "maxMarks": { "type": "number" },
+        "evaluationData": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "examId", "studentName", "bookletUrl", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profiles."
+    },
+    "/exams/{examId}": {
+      "schema": "Exam",
+      "description": "Exam reference data."
+    },
+    "/submissions/{submissionId}": {
+      "schema": "Submission",
+      "description": "Student submissions and evaluations."
+    }
+  }
+}
