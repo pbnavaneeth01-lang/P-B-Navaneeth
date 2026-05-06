@@ -1,35 +1,58 @@
 {
   "entities": {
-    "UserProfile": {
+    "User": {
       "title": "User Profile",
-      "description": "Basic user information.",
+      "description": "User account information synchronized from Firebase Auth.",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
         "displayName": { "type": "string" },
-        "email": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
         "photoURL": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "email"]
+      "required": ["uid", "createdAt"]
     },
     "Exam": {
-      "title": "Exam",
-      "description": "Defines an exam with its reference documents.",
+      "title": "Examination",
+      "description": "A set of question papers and marking schemes for evaluation.",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
         "title": { "type": "string" },
         "questionPaperUrl": { "type": "string" },
         "markingSchemeUrl": { "type": "string" },
-        "studentList": { "type": "array", "items": { "type": "string" } },
+        "studentList": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "title", "questionPaperUrl", "markingSchemeUrl"]
+      "required": ["uid", "title", "questionPaperUrl", "markingSchemeUrl", "createdAt"]
+    },
+    "EvaluationQuestion": {
+      "title": "Evaluation Question",
+      "description": "Details of an individual question evaluation by AI.",
+      "type": "object",
+      "properties": {
+        "questionNumber": { "type": "string" },
+        "transcription": { "type": "string" },
+        "marksAwarded": { "type": "number" },
+        "maxMarks": { "type": "number" },
+        "feedback": { "type": "string" },
+        "pageNumber": { "type": "number" },
+        "boundingBox": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 4,
+          "maxItems": 4
+        }
+      },
+      "required": ["questionNumber", "transcription", "marksAwarded", "maxMarks", "feedback", "pageNumber"]
     },
     "Submission": {
-      "title": "Submission",
-      "description": "A student's submission for an exam.",
+      "title": "Student Submission",
+      "description": "A student's answer booklet submission and its AI evaluation.",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
@@ -39,24 +62,32 @@
         "status": { "type": "string", "enum": ["pending", "evaluated"] },
         "totalMarks": { "type": "number" },
         "maxMarks": { "type": "number" },
-        "evaluationData": { "type": "object" },
+        "evaluationData": {
+          "type": "object",
+          "properties": {
+            "questions": {
+              "type": "array",
+              "items": { "$ref": "#/entities/EvaluationQuestion" }
+            }
+          }
+        },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "examId", "studentName", "bookletUrl", "status"]
+      "required": ["uid", "examId", "studentName", "bookletUrl", "status", "createdAt"]
     }
   },
   "firestore": {
-    "/users/{userId}": {
-      "schema": "UserProfile",
-      "description": "User profiles."
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Public and private user profile data."
     },
-    "/exams/{examId}": {
+    "exams/{examId}": {
       "schema": "Exam",
-      "description": "Exam reference data."
+      "description": "Examination metadata and source files."
     },
-    "/submissions/{submissionId}": {
+    "submissions/{submissionId}": {
       "schema": "Submission",
-      "description": "Student submissions and evaluations."
+      "description": "Student booklets and evaluation results."
     }
   }
 }

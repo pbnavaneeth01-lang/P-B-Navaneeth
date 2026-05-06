@@ -41,4 +41,4 @@ export interface Submission {
   createdAt: string;
 }
 
-export type AppFeature = "dashboard" | "exams" | "submissions" | "students" | "evaluate";
+export type AppFeature = "dashboard" | "exams" | "submissions" | "students" | "evaluate" | "about";

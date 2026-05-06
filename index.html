@@ -3,11 +3,133 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>GradeMaster AI</title>
+    <style>
+      body {
+        background-color: #020617;
+        margin: 0;
+        font-family: inherit;
+        color-scheme: dark;
+      }
+      .loader-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 40px;
+        color: white;
+        text-align: center;
+        position: fixed;
+        inset: 0;
+        justify-content: center;
+        z-index: 9999;
+      }
+      .loader-visual {
+        position: relative;
+        width: 96px;
+        height: 96px;
+      }
+      .loader-icon {
+        width: 100%;
+        height: 100%;
+        background-color: rgba(37, 99, 235, 0.1);
+        border: 1px solid rgba(37, 99, 235, 0.2);
+        border-radius: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 2;
+        position: relative;
+      }
+      .loader-pulse {
+        position: absolute;
+        inset: 0;
+        background-color: #3b82f6;
+        border-radius: 32px;
+        animation: pulse 2s infinite ease-out;
+        z-index: 1;
+      }
+      @keyframes pulse {
+        0% { transform: scale(1); opacity: 0.5; }
+        100% { transform: scale(2); opacity: 0; }
+      }
+      .loader-text h1 {
+        font-size: 36px;
+        font-weight: 800;
+        margin: 0;
+        letter-spacing: -0.05em;
+        color: white;
+      }
+      .loader-text span {
+        color: #3b82f6;
+      }
+      .loader-status {
+        margin-top: 12px;
+        font-size: 14px;
+        font-weight: 700;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        justify-content: center;
+      }
+      .dots {
+        display: flex;
+        gap: 4px;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        background-color: #3b82f6;
+        border-radius: 50%;
+        animation: blink 1.5s infinite;
+      }
+      .dot:nth-child(2) { animation-delay: 0.2s; }
+      .dot:nth-child(3) { animation-delay: 0.4s; }
+      @keyframes blink {
+        0%, 100% { opacity: 0; }
+        50% { opacity: 1; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div class="loader-container" id="initial-loader">
+      <div class="loader-visual">
+        <div class="loader-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>
+        </div>
+        <div class="loader-pulse"></div>
+      </div>
+      <div class="loader-text">
+        <h1>GradeMaster <span>AI</span></h1>
+        <div class="loader-status">
+          Initializing Intelligence
+          <div class="dots">
+            <div class="dot"></div>
+            <div class="dot"></div>
+            <div class="dot"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="root">
+    </div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // Clear legacy PWA service workers that might be caching old versions
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          for(let registration of registrations) {
+            registration.unregister();
+            console.log('Legacy ServiceWorker unregistered to force update.');
+          }
+        });
+      }
+    </script>
   </body>
 </html>
 

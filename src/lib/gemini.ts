@@ -233,12 +233,18 @@ export const evaluateExam = async (
     3. A Student's Submission (Handwritten, Typed, or Scanned).
 
     Your task is to:
-    - Transcribe or read the student's answers (handle handwriting or typed text).
-    - Compare each answer with the marking scheme and the question paper.
+    - The documents provided (Question Paper, Marking Scheme, Student Booklet) may be in any language.
+    - Transcribe or read the student's answers (handle handwriting or typed text) in their original language.
+    - Compare each answer with the marking scheme and the question paper, regardless of the language used.
     - IMPORTANT: If the subject or the topic in the student's answer booklet is not related to the question paper, assign zero marks for all questions and provide feedback explaining the mismatch.
-    - Assign marks for each question based on the marking scheme. Award partial marks based on the amount of relevant information provided and the percentage of the required answer written (e.g., if an answer is 50% complete according to the marking scheme, award approximately 50% of the marks).
-    - Provide brief feedback for each answer, explicitly mentioning if marks were awarded partially due to the amount of information provided.
-    - Calculate the total marks.
+    
+    HUMAN-LIKE CORRECTION PRINCIPLES:
+    - SEMANTIC FLEXIBILITY: Award full or near-full marks for conceptually correct, related, or alternative valid answers. Do not penalize for using synonyms or alternative phrasing that carries the same scientific or logical meaning as the marking scheme.
+    - REWARD INTENT: If a student clearly understands the core concept but makes minor execution errors (e.g., a spelling mistake in a technical term, or a single calculation error in a complex multi-step problem), award significant partial marks.
+    - LOGICAL PATHWAY: In technical subjects (Math/Science), evaluate the student's step-by-step logic. If the reasoning is correct but the final answer is wrong due to a minor carry-over error, award marks for the correct logic steps.
+    - PARTIAL CREDIT: Award partial marks based on the quality of reasoning and the percentage of relevant knowledge demonstrated.
+    - FEEDBACK: Provide helpful feedback in English. If marks were awarded for related/alternative answers, explain the reasoning behind this "Human-like" adjustment.
+    - Calculate the total marks based on these flexible principles.
 
     Return the result in JSON format with the following structure:
     {
@@ -258,83 +264,111 @@ export const evaluateExam = async (
     }
   `;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
-    contents: {
-      parts: [
-        { inlineData: questionPaper },
-        { inlineData: markingScheme },
-        { inlineData: studentBooklet },
-        { text: prompt },
-      ],
-    },
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          totalMarks: { type: Type.NUMBER },
-          maxMarks: { type: Type.NUMBER },
-          questions: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                questionNumber: { type: Type.STRING },
-                transcription: { type: Type.STRING },
-                marksAwarded: { type: Type.NUMBER },
-                maxMarks: { type: Type.NUMBER },
-                feedback: { type: Type.STRING },
-                pageNumber: { type: Type.NUMBER },
-                boundingBox: {
-                  type: Type.ARRAY,
-                  items: { type: Type.NUMBER }
-                }
-              },
-              required: ["questionNumber", "transcription", "marksAwarded", "maxMarks", "feedback"]
-            }
-          }
-        },
-        required: ["totalMarks", "maxMarks", "questions"]
-      }
-    },
-  });
-
-  const text = response.text;
-  if (!text) {
-    throw new Error("The AI returned an empty response. This can happen if the documents are too complex or blurry.");
-  }
-
   try {
-    const result = JSON.parse(text);
-    
-    // Helper to ensure valid numbers for Firestore
-    const ensureValidNumber = (val: any, fallback: number = 0): number => {
-      const num = Number(val);
-      return (typeof num === 'number' && !isNaN(num)) ? num : fallback;
-    };
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-preview",
+      contents: {
+        parts: [
+          { inlineData: questionPaper },
+          { inlineData: markingScheme },
+          { inlineData: studentBooklet },
+          { text: prompt },
+        ],
+      },
+      config: {
+        responseMimeType: "application/json",
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_HATE_SPEECH' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_CIVIC_INTEGRITY' as any, threshold: 'BLOCK_NONE' as any },
+        ],
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            totalMarks: { type: Type.NUMBER },
+            maxMarks: { type: Type.NUMBER },
+            questions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  questionNumber: { type: Type.STRING },
+                  transcription: { type: Type.STRING },
+                  marksAwarded: { type: Type.NUMBER },
+                  maxMarks: { type: Type.NUMBER },
+                  feedback: { type: Type.STRING },
+                  pageNumber: { type: Type.NUMBER },
+                  boundingBox: {
+                    type: Type.ARRAY,
+                    items: { type: Type.NUMBER }
+                  }
+                },
+                required: ["questionNumber", "transcription", "marksAwarded", "maxMarks", "feedback"]
+              }
+            }
+          },
+          required: ["totalMarks", "maxMarks", "questions"]
+        }
+      },
+    });
 
-    // Ensure totalMarks and maxMarks are valid numbers
-    result.totalMarks = ensureValidNumber(result.totalMarks, 0);
-    result.maxMarks = ensureValidNumber(result.maxMarks, 0);
+    const text = response.text;
+    if (!text) {
+      // Check for common finish reasons
+      const candidate = response.candidates?.[0];
+      if (candidate?.finishReason === "SAFETY") {
+        throw new Error("AI_ERROR_SAFETY: The AI safety filter was triggered. This can happen if the documents contain sensitive or restricted content.");
+      }
+      if (candidate?.finishReason === "RECITATION") {
+        throw new Error("AI_ERROR_RECITATION: The AI detected copyrighted material and blocked the response.");
+      }
+      throw new Error("AI_ERROR_EMPTY: The AI returned an empty response. This usually happens if the handwriting is too unclear or the images are too blurry to process.");
+    }
+
+    try {
+      const result = JSON.parse(text);
+      
+      // Helper to ensure valid numbers for Firestore
+      const ensureValidNumber = (val: any, fallback: number = 0): number => {
+        const num = Number(val);
+        return (typeof num === 'number' && !isNaN(num)) ? num : fallback;
+      };
+
+      // Ensure totalMarks and maxMarks are valid numbers
+      result.totalMarks = ensureValidNumber(result.totalMarks, 0);
+      result.maxMarks = ensureValidNumber(result.maxMarks, 0);
+      
+      // Ensure questions array exists and has valid numeric fields
+      if (!Array.isArray(result.questions)) {
+        result.questions = [];
+      } else {
+        result.questions = result.questions.map((q: any) => ({
+          ...q,
+          marksAwarded: ensureValidNumber(q.marksAwarded, 0),
+          maxMarks: ensureValidNumber(q.maxMarks, 0),
+          pageNumber: ensureValidNumber(q.pageNumber, 1),
+          boundingBox: Array.isArray(q.boundingBox) ? q.boundingBox.map((b: any) => ensureValidNumber(b, 0)) : undefined
+        }));
+      }
+      
+      return result;
+    } catch (e) {
+      console.error("AI Response was not valid JSON:", text);
+      throw new Error("AI_ERROR_FORMAT: The AI returned an unreadable response format. This often happens if the documents are too complex or the scan quality is low.");
+    }
+  } catch (error: any) {
+    if (error.message?.includes("AI_ERROR_")) throw error;
     
-    // Ensure questions array exists and has valid numeric fields
-    if (!Array.isArray(result.questions)) {
-      result.questions = [];
-    } else {
-      result.questions = result.questions.map((q: any) => ({
-        ...q,
-        marksAwarded: ensureValidNumber(q.marksAwarded, 0),
-        maxMarks: ensureValidNumber(q.maxMarks, 0),
-        pageNumber: ensureValidNumber(q.pageNumber, 1),
-        boundingBox: Array.isArray(q.boundingBox) ? q.boundingBox.map((b: any) => ensureValidNumber(b, 0)) : undefined
-      }));
+    if (error.message?.includes("429") || error.message?.includes("quota")) {
+      throw new Error("AI_ERROR_QUOTA: AI service quota exceeded. Please wait a moment and try again.");
+    }
+    if (error.message?.includes("500") || error.message?.includes("server error")) {
+      throw new Error("AI_ERROR_SERVER: The AI server encountered an error. Please try again later.");
     }
     
-    return result;
-  } catch (e) {
-    console.error("AI Response was not valid JSON:", text);
-    throw new Error("The AI returned an invalid response format. This can happen if the documents are too complex or blurry.");
+    throw error;
   }
 };
 
@@ -345,6 +379,7 @@ export const extractStudentDetails = async (
   const prompt = `
     You are an expert administrative assistant. I am providing you with the first page of a student's exam booklet.
     Your task is to extract the student's details from this page.
+    The document may be in any language. Identify the student details regardless of the language used for the labels (e.g., "Name" in English, "Nombre" in Spanish, "Nom" in French, "नाम" in Hindi, etc.).
     Look for fields like "Name", "Student Name", "Candidate Name", "ID", "Roll Number", "Student ID", etc.
 
     Return the result in JSON format with the following structure:
@@ -356,37 +391,63 @@ export const extractStudentDetails = async (
     If you cannot find a name, return an empty string for studentName.
   `;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: {
-      parts: [
-        { inlineData: studentBooklet },
-        { text: prompt },
-      ],
-    },
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          studentName: { type: Type.STRING },
-          studentId: { type: Type.STRING },
-          otherDetails: { type: Type.OBJECT }
-        },
-        required: ["studentName"]
-      }
-    },
-  });
-
-  const text = response.text;
-  if (!text) return { studentName: "" };
-
   try {
-    const result = JSON.parse(text);
-    if (typeof result.studentName !== 'string') result.studentName = "";
-    return result;
-  } catch (e) {
-    console.error("AI Response was not valid JSON:", text);
-    return { studentName: "" };
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [
+          { inlineData: studentBooklet },
+          { text: prompt },
+        ],
+      },
+      config: {
+        responseMimeType: "application/json",
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_HATE_SPEECH' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT' as any, threshold: 'BLOCK_NONE' as any },
+          { category: 'HARM_CATEGORY_CIVIC_INTEGRITY' as any, threshold: 'BLOCK_NONE' as any },
+        ],
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            studentName: { type: Type.STRING },
+            studentId: { type: Type.STRING },
+            otherDetails: { type: Type.OBJECT }
+          },
+          required: ["studentName"]
+        }
+      },
+    });
+
+    const text = response.text;
+    if (!text) {
+      const candidate = response.candidates?.[0];
+      if (candidate?.finishReason === "SAFETY") {
+        throw new Error("AI_ERROR_SAFETY: The AI safety filter was triggered.");
+      }
+      throw new Error("AI_ERROR_EMPTY: The AI could not read the student details. The image might be too blurry or the handwriting unclear.");
+    }
+
+    try {
+      const result = JSON.parse(text);
+      if (typeof result.studentName !== 'string') result.studentName = "";
+      return result;
+    } catch (e) {
+      console.error("AI Response was not valid JSON:", text);
+      throw new Error("AI_ERROR_FORMAT: The AI returned an unreadable response format.");
+    }
+  } catch (error: any) {
+    if (error.message?.includes("AI_ERROR_")) throw error;
+    
+    if (error.message?.includes("429") || error.message?.includes("quota")) {
+      throw new Error("AI_ERROR_QUOTA: AI service quota exceeded.");
+    }
+    if (error.message?.includes("500") || error.message?.includes("server error")) {
+      throw new Error("AI_ERROR_SERVER: The AI server encountered an error.");
+    }
+    
+    throw error;
   }
 };

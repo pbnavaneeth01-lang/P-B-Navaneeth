@@ -1,72 +1,108 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // ===============================================================
-    // Helper Functions
-    // ===============================================================
-    function isAuthenticated() { return request.auth != null; }
-    function isOwner(uid) { return isAuthenticated() && request.auth.uid == uid; }
-    function isAdmin() {
-      return isAuthenticated() && (
-        request.auth.token.email == "pbnavaneeth01@gmail.com" && request.auth.token.email_verified == true
-      );
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
     }
 
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    // Collection: users
-    // - uid: string (required)
-    // - displayName: string
-    // - email: string
-    // - photoURL: string
-    // - createdAt: string (ISO 8601)
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
 
-    // Collection: exams
-    // - uid: string (required)
-    // - title: string (required)
-    // - questionPaperUrl: string (required)
-    // - markingSchemeUrl: string (required)
-    // - createdAt: string (ISO 8601)
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
 
-    // Collection: submissions
-    // - uid: string (required)
-    // - examId: string (required)
-    // - studentName: string (required)
-    // - bookletUrl: string (required)
-    // - status: string (pending|evaluated, required)
-    // - totalMarks: number
-    // - maxMarks: number
-    // - evaluationData: map
-    // - createdAt: string (ISO 8601)
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
 
-    // Collection: history
-    // - uid: string (required)
-    // - type: string
-    // - prompt: string
-    // - resultUrl: string
-    // - createdAt: string (ISO 8601)
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUser(data) {
+      return data.uid == request.auth.uid 
+        && data.displayName is string && data.displayName.size() <= 200
+        && data.email is string && data.email.size() <= 200
+        && (data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 1000))
+        && data.createdAt is string && data.createdAt.size() <= 100
+        && data.keys().hasAll(['uid', 'createdAt'])
+        && data.keys().size() >= 2 && data.keys().size() <= 5;
+    }
+
+    function isValidExam(data) {
+      return data.uid == request.auth.uid
+        && data.title is string && data.title.size() <= 200
+        && data.questionPaperUrl is string && data.questionPaperUrl.size() <= 1000
+        && data.markingSchemeUrl is string && data.markingSchemeUrl.size() <= 1000
+        && (data.get('studentList', null) == null || data.studentList is list)
+        && data.createdAt is string && data.createdAt.size() <= 100
+        && data.keys().hasAll(['uid', 'title', 'questionPaperUrl', 'markingSchemeUrl', 'createdAt'])
+        && data.keys().size() >= 5 && data.keys().size() <= 6;
+    }
+
+    function isValidEvaluationQuestion(q) {
+      return q.questionNumber is string && q.questionNumber.size() <= 50
+        && q.transcription is string && q.transcription.size() <= 5000
+        && q.marksAwarded is number && q.maxMarks is number
+        && q.feedback is string && q.feedback.size() <= 2000
+        && q.pageNumber is number
+        && (q.get('boundingBox', null) == null || (q.boundingBox is list && q.boundingBox.size() == 4));
+    }
+
+    function isValidSubmission(data) {
+      return data.uid == request.auth.uid
+        && data.examId is string && data.examId.size() <= 100
+        && data.studentName is string && data.studentName.size() <= 200
+        && data.bookletUrl is string && data.bookletUrl.size() <= 1000
+        && data.status in ['pending', 'evaluated']
+        && data.createdAt is string && data.createdAt.size() <= 100
+        && (data.status == 'pending' || (
+             data.totalMarks is number 
+             && data.maxMarks is number 
+             && data.evaluationData is map
+             && data.evaluationData.questions is list
+           ))
+        && data.keys().hasAll(['uid', 'examId', 'studentName', 'bookletUrl', 'status', 'createdAt'])
+        && data.keys().size() >= 6 && data.keys().size() <= 9;
+    }
+
+    // --- Collections ---
 
     match /users/{userId} {
-      allow read, write: if isOwner(userId) || isAdmin();
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming()) 
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt;
     }
 
     match /exams/{examId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
-      allow update, delete: if isOwner(resource.data.uid) || isAdmin();
+      allow read: if isOwner(existing().uid);
+      allow create: if isSignedIn() && isValidExam(incoming());
+      allow update: if isOwner(existing().uid) && isValidExam(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(existing().uid);
     }
 
     match /submissions/{submissionId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
-      allow update, delete: if isOwner(resource.data.uid) || isAdmin();
-    }
-
-    match /history/{historyId} {
-      allow read: if isOwner(resource.data.uid) || isAdmin();
-      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
-      allow update, delete: if isOwner(resource.data.uid) || isAdmin();
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow get: if isOwner(existing().uid);
+      allow create: if isSignedIn() && isValidSubmission(incoming());
+      allow update: if isOwner(existing().uid) && isValidSubmission(incoming())
+        && incoming().uid == existing().uid
+        && incoming().examId == existing().examId;
+      allow delete: if isOwner(existing().uid);
     }
   }
 }
