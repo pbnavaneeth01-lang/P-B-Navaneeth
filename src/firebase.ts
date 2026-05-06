@@ -9,7 +9,7 @@ import {
   sendPasswordResetEmail, 
   updateProfile 
 } from "firebase/auth";
-import { getFirestore, doc, setDoc, getDoc, collection, addDoc, query, where, orderBy, onSnapshot, updateDoc, deleteDoc, getDocFromServer, enableIndexedDbPersistence } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, collection, addDoc, query, where, orderBy, onSnapshot, updateDoc, deleteDoc, getDocFromServer, enableIndexedDbPersistence, terminate, clearIndexedDbPersistence } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import firebaseConfig from "../firebase-applet-config.json";
 import { Exam, Submission } from "./types";
@@ -104,14 +104,25 @@ const syncUserProfile = async (user: any) => {
 
 export const signInWithGoogle = async () => {
   try {
+    // Check if we are online first
+    if (!navigator.onLine) {
+      throw new Error("No internet connection detected. Please check your network.");
+    }
+
     const result = await signInWithPopup(auth, googleProvider);
     await syncUserProfile(result.user);
     return result.user;
   } catch (error: any) {
     console.error("Error signing in with Google:", error);
-    if (error.code === 'auth/unauthorized-domain') {
-      throw new Error("UNAUTHORIZED_DOMAIN: This domain is not authorized in the Firebase Console. Please add 'grademasterai.vercel.app' to Authorized Domains in your Firebase Auth settings.");
+    
+    if (error.code === 'auth/network-request-failed') {
+      throw new Error("Network request failed. This can happen due to strict firewalls, browser extensions blocking popups, or being in a restricted preview environment. Try opening the application in a new tab or use Email/Password login.");
     }
+    
+    if (error.code === 'auth/popup-blocked') {
+      throw new Error("Sign-in popup was blocked by your browser. Please allow popups for this site and try again.");
+    }
+
     throw error;
   }
 };
@@ -122,11 +133,8 @@ export const signUpWithEmail = async (email: string, pass: string, name: string)
     await updateProfile(result.user, { displayName: name });
     await syncUserProfile(result.user);
     return result.user;
-  } catch (error: any) {
+  } catch (error) {
     console.error("Error signing up with email:", error);
-    if (error.code === 'auth/unauthorized-domain') {
-      throw new Error("UNAUTHORIZED_DOMAIN: This domain is not authorized in the Firebase Console. Please add 'grademasterai.vercel.app' to Authorized Domains in your Firebase Auth settings.");
-    }
     throw error;
   }
 };
@@ -136,11 +144,8 @@ export const loginWithEmail = async (email: string, pass: string) => {
     const result = await signInWithEmailAndPassword(auth, email, pass);
     await syncUserProfile(result.user);
     return result.user;
-  } catch (error: any) {
+  } catch (error) {
     console.error("Error logging in with email:", error);
-    if (error.code === 'auth/unauthorized-domain') {
-      throw new Error("UNAUTHORIZED_DOMAIN: This domain is not authorized in the Firebase Console. Please add 'grademasterai.vercel.app' to Authorized Domains in your Firebase Auth settings.");
-    }
     throw error;
   }
 };
@@ -212,6 +217,10 @@ export const deleteSubmission = async (id: string) => {
 
 export async function testConnection() {
   try {
+    if (!navigator.onLine) {
+      console.warn("Device is offline. Using local cache.");
+      return;
+    }
     // Testing connection to a dummy doc
     await getDocFromServer(doc(db, 'system', 'connection-test'));
   } catch (error) {

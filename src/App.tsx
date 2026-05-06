@@ -27,7 +27,8 @@ import {
   Info,
   ShieldCheck,
   Cpu,
-  BookMarked
+  BookMarked,
+  ExternalLink
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useDropzone } from "react-dropzone";
@@ -52,7 +53,8 @@ import {
   DashboardView, 
   ExamItem, 
   SubmissionsView, 
-  AboutView 
+  AboutView,
+  SettingsView
 } from "./components/Views";
 
 const BookletAnnotator = React.lazy(() => import("./components/Evaluation").then(m => ({ default: m.BookletAnnotator })));
@@ -272,6 +274,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [activeFeature, setActiveFeature] = useState<AppFeature>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(window.innerWidth >= 1024);
+  const [userApiKey, setUserApiKey] = useState<string>(localStorage.getItem("USER_GEMINI_KEY") || "");
+  const [aiProvider, setAiProvider] = useState<"google" | "openai">((localStorage.getItem("AI_PROVIDER") as any) || "google");
   
   // Data States
   const [exams, setExams] = useState<Exam[]>([]);
@@ -770,6 +774,61 @@ export default function App() {
     }
   };
 
+  const handleExportAllData = () => {
+    try {
+      const exportData = {
+        version: "1.0.0",
+        timestamp: new Date().toISOString(),
+        exams,
+        submissions
+      };
+      
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `grademaster_backup_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      
+      showToast("All data successfully exported.", "success");
+    } catch (err) {
+      showToast("Failed to export data.", "error");
+    }
+  };
+
+  const handleImportData = async (file: File) => {
+    if (!user) return;
+    try {
+      const text = await file.text();
+      const importData = JSON.parse(text);
+      
+      if (!importData.exams || !importData.submissions) {
+        throw new Error("Invalid backup file format.");
+      }
+
+      showToast("Restoring records...", "loading");
+      
+      // We don't want to just overwrite everything blindly, but for "Indigenous" restoration
+      // we'll batch create them.
+      for (const exam of importData.exams) {
+        const { id, ...examData } = exam;
+        await createExam({ ...examData, uid: user.uid });
+      }
+      
+      for (const sub of importData.submissions) {
+        const { id, ...subData } = sub;
+        await createSubmission({ ...subData, uid: user.uid });
+      }
+      
+      showToast(`Restored ${importData.exams.length} exams and ${importData.submissions.length} submissions.`, "success");
+    } catch (err: any) {
+      showToast(`Import failed: ${err.message}`, "error");
+    }
+  };
+
   const handleEvaluate = async (submission: Submission, silent: boolean = false) => {
     const exam = exams.find(e => e.id === submission.examId);
     if (!exam) return;
@@ -1238,9 +1297,21 @@ export default function App() {
             ) : (
               <form onSubmit={handleEmailAuth} className="space-y-4">
                 {authErrorLocal && (
-                  <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-center gap-2 text-red-400 text-xs font-bold animate-shake">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{authErrorLocal}</span>
+                  <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex flex-col gap-2 text-red-400 text-xs font-bold animate-shake">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{authErrorLocal}</span>
+                    </div>
+                    {authErrorLocal.includes("Network request failed") && (
+                      <button 
+                        type="button"
+                        onClick={() => window.open(window.location.href, '_blank')}
+                        className="mt-2 py-2.5 bg-white/5 border border-white/10 rounded-xl text-center hover:bg-white/10 transition-all active:scale-95 flex items-center justify-center gap-2"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        Fix: Open in New Tab
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -1308,16 +1379,16 @@ export default function App() {
 
             <div className="relative flex items-center gap-4 text-slate-700">
               <div className="flex-1 h-px bg-slate-800" />
-              <span className="text-[10px] font-black uppercase tracking-widest">OR</span>
+              <span className="text-[10px] font-black uppercase tracking-widest">Optional</span>
               <div className="flex-1 h-px bg-slate-800" />
             </div>
 
             <button
               onClick={() => signInWithGoogle().catch(err => setAuthErrorLocal(err.message))}
-              className="w-full py-4 px-6 bg-white text-black font-bold rounded-2xl flex items-center justify-center gap-3 hover:bg-slate-100 transition-all active:scale-95 shadow-xl shadow-white/10"
+              className="w-full py-3.5 px-6 bg-slate-800 text-white/70 text-sm font-bold rounded-2xl flex items-center justify-center gap-3 hover:bg-slate-700 transition-all active:scale-95 border border-slate-700"
             >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="" />
-              Continue with Google
+              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-4 h-4 opacity-50 gray" style={{ filter: 'grayscale(1)' }} alt="" />
+              Social Login (Google)
             </button>
 
             <div className="text-center pt-2">
@@ -1430,6 +1501,14 @@ export default function App() {
                 active={activeFeature === "about"} 
                 onClick={() => { setActiveFeature("about"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
               />
+              {user?.email === "pbnavaneeth01@gmail.com" && (
+                <SidebarItem 
+                  icon={Cpu} 
+                  label="Settings" 
+                  active={activeFeature === "settings"} 
+                  onClick={() => { setActiveFeature("settings"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
+                />
+              )}
             </nav>
 
             <div className="p-6 border-t border-slate-800">
@@ -2138,6 +2217,37 @@ export default function App() {
 
             {activeFeature === "about" && (
               <AboutView />
+            )}
+
+            {activeFeature === "settings" && user?.email === "pbnavaneeth01@gmail.com" && (
+              <SettingsView 
+                userApiKey={userApiKey}
+                onSaveApiKey={(key) => {
+                  setUserApiKey(key);
+                  localStorage.setItem("USER_GEMINI_KEY", key);
+                  showToast("API Settings updated successfully", "success");
+                }}
+                aiProvider={aiProvider}
+                setAiProvider={(p) => {
+                  setAiProvider(p);
+                  localStorage.setItem("AI_PROVIDER", p);
+                  showToast(`Provider switched to ${p}`, "info");
+                }}
+                onExport={handleExportAllData}
+                onImport={handleImportData}
+                onResetPassword={async () => {
+                  if (!user || !user.email) return;
+                  try {
+                    setLoading(true);
+                    await resetPassword(user.email);
+                    showToast("Reset password link sent to your email", "success");
+                  } catch (err: any) {
+                    showToast(`Failed to send reset link: ${err.message}`, "error");
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+              />
             )}
           </AnimatePresence>
         </div>

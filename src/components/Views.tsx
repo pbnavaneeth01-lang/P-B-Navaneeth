@@ -46,14 +46,9 @@ export const DashboardView = React.memo(({
     >
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <h1 className="text-4xl font-black text-white tracking-tight">
-              Exam Insights
-            </h1>
-            <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-[10px] font-black uppercase tracking-widest mt-1">
-              v2.2.1
-            </span>
-          </div>
+          <h1 className="text-4xl font-black text-white tracking-tight">
+            Exam Insights
+          </h1>
           <p className="text-slate-400 text-lg font-medium">Real-time performance analytics across all assessments.</p>
         </div>
       </div>
@@ -251,13 +246,7 @@ export const SubmissionsView = React.memo(({
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
-            <div className="flex items-center gap-2 mb-1">
-              <h1 className="text-3xl font-black text-white tracking-tight">{exam?.title || "Exam Submissions"}</h1>
-              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-black uppercase tracking-widest">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Live v2.2.1
-              </div>
-            </div>
+            <h1 className="text-3xl font-black text-white tracking-tight">{exam?.title || "Exam Submissions"}</h1>
             <p className="text-slate-400 font-medium">Monitoring academic integrity and performance.</p>
           </div>
         </div>
@@ -479,6 +468,157 @@ export const SubmissionItem = React.memo(({
 
 // --- About View ---
 
+// --- Settings View ---
+
+export const SettingsView = React.memo(({ 
+  userApiKey, 
+  onSaveApiKey,
+  aiProvider,
+  setAiProvider,
+  onExport,
+  onImport,
+  onResetPassword
+}: { 
+  userApiKey: string; 
+  onSaveApiKey: (key: string) => void;
+  aiProvider: string;
+  setAiProvider: (p: any) => void;
+  onExport: () => void;
+  onImport: (file: File) => void;
+  onResetPassword: () => void;
+}) => {
+  const [tempKey, setTempKey] = React.useState(userApiKey);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="max-w-4xl mx-auto space-y-12 py-8"
+    >
+      <div className="flex items-center gap-4">
+        <div className="w-16 h-16 bg-slate-900 border border-slate-800 rounded-2xl flex items-center justify-center text-slate-400">
+          <Cpu className="w-8 h-8" />
+        </div>
+        <div>
+          <h1 className="text-4xl font-black text-white tracking-tighter">System Configuration</h1>
+          <p className="text-slate-400 font-medium">Manage your indigenous deployment and AI infrastructure.</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="p-8 rounded-[32px] bg-slate-900 border border-slate-800 space-y-6 shadow-xl">
+          <div className="flex items-center gap-3 text-blue-400 border-b border-slate-800 pb-4">
+            <BrainCircuit className="w-5 h-5" />
+            <h3 className="font-bold uppercase tracking-widest text-sm text-white">AI Infrastructure</h3>
+          </div>
+          
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">AI Provider</label>
+              <select 
+                value={aiProvider}
+                onChange={(e) => setAiProvider(e.target.value as any)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm text-white focus:border-blue-600 outline-none"
+              >
+                <option value="google">Google Gemini (Efficiency)</option>
+                <option value="openai">OpenAI GPT-4o (Reasoning)</option>
+                <option value="anthropic">Anthropic Claude 3.5 (Elite)</option>
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Custom API Key</label>
+              <div className="relative">
+                <input 
+                  type="password"
+                  value={tempKey}
+                  onChange={(e) => setTempKey(e.target.value)}
+                  placeholder="Enter your personal API key..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm text-white placeholder:text-slate-700 focus:border-blue-600 outline-none pr-20"
+                />
+                <button 
+                  onClick={() => onSaveApiKey(tempKey)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-blue-600 text-[10px] font-black uppercase text-white rounded-lg hover:bg-blue-500 transition-all"
+                >
+                  Save
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-500 leading-relaxed ml-1">
+                By providing your own key, the application works independently of system limits. 
+                Your key is stored locally in your browser.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-8 rounded-[32px] bg-slate-900 border border-slate-800 space-y-6 shadow-xl">
+          <div className="flex items-center gap-3 text-emerald-400 border-b border-slate-800 pb-4">
+            <Download className="w-5 h-5" />
+            <h3 className="font-bold uppercase tracking-widest text-sm text-white">Data Sovereignty</h3>
+          </div>
+          
+          <div className="space-y-4">
+            <p className="text-sm text-slate-400 leading-relaxed font-medium">
+              Maintain full control over your records. You can export all exams and submissions to a single portable file.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <input 
+                type="file" 
+                ref={fileInputRef} 
+                className="hidden" 
+                accept=".json"
+                onChange={(e) => e.target.files?.[0] && onImport(e.target.files[0])}
+              />
+              <button 
+                className="flex items-center justify-center gap-2 px-4 py-3 bg-emerald-600/10 border border-emerald-600/20 text-emerald-400 rounded-2xl text-xs font-black uppercase tracking-tighter hover:bg-emerald-600/20"
+                onClick={onExport}
+              >
+                <Download className="w-4 h-4" />
+                Export Data
+              </button>
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center justify-center gap-2 px-4 py-3 bg-slate-800 text-slate-400 rounded-2xl text-xs font-black uppercase tracking-tighter hover:text-white transition-colors"
+              >
+                <Upload className="w-4 h-4" />
+                Import File
+              </button>
+            </div>
+            <p className="text-[10px] text-slate-600 text-center uppercase tracking-widest font-black">Indigenous Backup Mode</p>
+          </div>
+        </div>
+
+        <div className="p-8 rounded-[32px] bg-slate-900 border border-slate-800 space-y-6 shadow-xl md:col-span-2">
+          <div className="flex items-center gap-3 text-red-400 border-b border-slate-800 pb-4">
+            <ShieldCheck className="w-5 h-5" />
+            <h3 className="font-bold uppercase tracking-widest text-sm text-white">Security & Access</h3>
+          </div>
+          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+            <div className="space-y-1">
+              <h4 className="text-white font-bold">Password Management</h4>
+              <p className="text-slate-500 text-sm">Request a secure link to reset your password via email.</p>
+            </div>
+            <button 
+              onClick={onResetPassword}
+              className="px-6 py-3 bg-red-600/10 border border-red-600/20 text-red-400 font-bold rounded-2xl hover:bg-red-600/20 transition-all flex items-center gap-2"
+            >
+              <Sparkles className="w-4 h-4" />
+              Send Reset Email
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="p-12 rounded-[40px] bg-blue-600/5 border border-blue-500/10 flex flex-col items-center text-center space-y-4">
+        <ShieldCheck className="w-12 h-12 text-blue-500" />
+        <h3 className="text-xl font-bold text-white">Full Autonomy Enabled</h3>
+        <p className="text-slate-400 max-w-sm font-medium">This application is designed to be self-hosted and independent. Your data is yours, and your infrastructure choice is flexible.</p>
+      </div>
+    </motion.div>
+  );
+});;
+
 export const AboutView = React.memo(() => (
   <motion.div
     initial={{ opacity: 0, scale: 0.98 }}
@@ -493,7 +633,7 @@ export const AboutView = React.memo(() => (
       <p className="text-slate-400 text-xl font-medium max-w-2xl mx-auto">Advanced academic evaluation powered by state-of-the-art vision and language models.</p>
       <div className="flex items-center justify-center gap-4 text-emerald-400 font-bold bg-emerald-400/5 py-2.5 px-8 rounded-full w-max mx-auto border border-emerald-400/10 shadow-lg">
         <ShieldCheck className="w-4 h-4" />
-        GradeMaster v2.2.0
+        Independent Academic Evaluator
       </div>
     </div>
 
@@ -505,7 +645,7 @@ export const AboutView = React.memo(() => (
         </div>
         <div className="space-y-8 pl-4 border-l-2 border-slate-800 ml-3">
           {[
-            { step: "01", title: "Authentication", desc: "Sign in with Google to secure your data and access your private dashboard." },
+            { step: "01", title: "Registration", desc: "Create an account using your email or a secure social provider." },
             { step: "02", title: "Exams Config", desc: "Create an exam, upload the Question Paper and a detailed Marking Scheme. This is the AI's 'Brain'." },
             { step: "03", title: "Bulk Submission", desc: "Upload student booklets. You can drag and drop multiple images or PDFs at once." },
             { step: "04", title: "AI Evaluation", desc: "The system identifies handwriting and marks each question against the scheme automatically." },
