@@ -1,10 +1,10 @@
 {
-  "projectId": "gen-lang-client-0650037428",
-  "appId": "1:684098738287:web:519bfafc35a13f9eb3159a",
-  "apiKey": "AIzaSyDJO4GTAQ6lsMDeOvE4_95IuBnZw5N3eLU",
-  "authDomain": "gen-lang-client-0650037428.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-a7a869f3-c399-4d55-9afe-b23b87515d5f",
-  "storageBucket": "gen-lang-client-0650037428.firebasestorage.app",
-  "messagingSenderId": "684098738287",
+  "projectId": "grademasterai-5e01d",
+  "appId": "1:777138443234:web:your_web_app_id_here",
+  "apiKey": "AIzaSyDBkhmxnZ3V44ALN6i819n3RMHipQPlsdk",
+  "authDomain": "grademasterai-5e01d.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "grademasterai-5e01d.firebasestorage.app",
+  "messagingSenderId": "777138443234",
   "measurementId": ""
 }

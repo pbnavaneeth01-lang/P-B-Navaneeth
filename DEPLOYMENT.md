@@ -26,11 +26,15 @@ npm run build
 Then upload the contents of the `dist/` folder to any static host (Netlify, GitHub Pages, etc.).
 
 ## Firebase Setup
-Since the app uses Firebase for the database:
+Since the app uses Firebase for the database and authentication:
 1. Go to the [Firebase Console](https://console.firebase.google.com/).
 2. Create a new project.
 3. Replace the contents of `firebase-applet-config.json` with your new project's config.
-4. Deploy rules using `firebase-tools`:
+4. **CRITICAL: AUTHORIZED DOMAINS**
+   - Go to **Authentication** > **Settings** > **Authorized Domains**.
+   - Click **Add Domain** and enter your production domain (e.g., `your-app.vercel.app` or `yourdomain.com`).
+   - Without this step, **Google Login will fail** with a network error.
+5. Deploy rules using `firebase-tools`:
    ```bash
    firebase deploy --only firestore:rules
    ```
