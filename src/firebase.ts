@@ -107,8 +107,11 @@ export const signInWithGoogle = async () => {
     const result = await signInWithPopup(auth, googleProvider);
     await syncUserProfile(result.user);
     return result.user;
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error signing in with Google:", error);
+    if (error.code === 'auth/unauthorized-domain') {
+      throw new Error("UNAUTHORIZED_DOMAIN: This domain is not authorized in the Firebase Console. Please add 'grademasterai.vercel.app' to Authorized Domains in your Firebase Auth settings.");
+    }
     throw error;
   }
 };
@@ -119,8 +122,11 @@ export const signUpWithEmail = async (email: string, pass: string, name: string)
     await updateProfile(result.user, { displayName: name });
     await syncUserProfile(result.user);
     return result.user;
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error signing up with email:", error);
+    if (error.code === 'auth/unauthorized-domain') {
+      throw new Error("UNAUTHORIZED_DOMAIN: This domain is not authorized in the Firebase Console. Please add 'grademasterai.vercel.app' to Authorized Domains in your Firebase Auth settings.");
+    }
     throw error;
   }
 };
@@ -130,8 +136,11 @@ export const loginWithEmail = async (email: string, pass: string) => {
     const result = await signInWithEmailAndPassword(auth, email, pass);
     await syncUserProfile(result.user);
     return result.user;
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error logging in with email:", error);
+    if (error.code === 'auth/unauthorized-domain') {
+      throw new Error("UNAUTHORIZED_DOMAIN: This domain is not authorized in the Firebase Console. Please add 'grademasterai.vercel.app' to Authorized Domains in your Firebase Auth settings.");
+    }
     throw error;
   }
 };
