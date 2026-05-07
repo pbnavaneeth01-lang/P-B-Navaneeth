@@ -14,6 +14,8 @@ export interface Exam {
   markingSchemeUrl: string;
   studentList?: string[];
   createdAt: string;
+  qpPageCount?: number;
+  msPageCount?: number;
 }
 
 export interface EvaluationQuestion {
@@ -35,10 +37,12 @@ export interface Submission {
   status: "pending" | "evaluated";
   totalMarks?: number;
   maxMarks?: number;
+  pageCount?: number;
   evaluationData?: {
+    summary?: string;
     questions: EvaluationQuestion[];
   };
   createdAt: string;
 }
 
-export type AppFeature = "dashboard" | "exams" | "submissions" | "students" | "evaluate" | "about" | "settings";
+export type AppFeature = "dashboard" | "exams" | "submissions" | "students" | "evaluate" | "about";

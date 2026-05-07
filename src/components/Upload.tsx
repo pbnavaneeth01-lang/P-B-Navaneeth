@@ -8,16 +8,13 @@ interface MultiFileUploadProps {
   label: string;
   onUpload: (files: File[]) => void;
   files: File[];
+  accept?: any;
 }
 
-export const MultiFileUpload = ({ label, onUpload, files }: MultiFileUploadProps) => {
+export const MultiFileUpload = ({ label, onUpload, files, accept }: MultiFileUploadProps) => {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: (acceptedFiles) => onUpload(acceptedFiles),
-    accept: {
-      'application/pdf': ['.pdf'],
-      'image/*': ['.png', '.jpg', '.jpeg'],
-      'application/zip': ['.zip']
-    }
+    accept,
   });
 
   return (
@@ -40,7 +37,7 @@ export const MultiFileUpload = ({ label, onUpload, files }: MultiFileUploadProps
             {files.length > 0 ? `${files.length} files selected` : "Bulk Upload Booklets"}
           </p>
           <p className="text-base text-slate-500 max-w-md mx-auto">
-            Drag & drop multiple PDFs, Images, or a ZIP file. We'll automatically identify students by their filenames.
+            Drag & drop PDFs, images, ZIP files, or any document. We'll automatically identify students by their filenames.
           </p>
         </div>
         

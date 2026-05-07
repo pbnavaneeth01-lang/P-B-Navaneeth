@@ -33,10 +33,10 @@ service cloud.firestore {
       return data.uid == request.auth.uid 
         && data.displayName is string && data.displayName.size() <= 200
         && data.email is string && data.email.size() <= 200
-        && (data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 1000))
-        && data.createdAt is string && data.createdAt.size() <= 100
-        && data.keys().hasAll(['uid', 'createdAt'])
-        && data.keys().size() >= 2 && data.keys().size() <= 5;
+        && (data.get('photoURL', null) == null || (data.photoURL is string && data.photoURL.size() <= 1000))
+        && data.createdAt is timestamp
+        && data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().size() >= 3 && data.keys().size() <= 6;
     }
 
     function isValidExam(data) {
@@ -45,18 +45,9 @@ service cloud.firestore {
         && data.questionPaperUrl is string && data.questionPaperUrl.size() <= 1000
         && data.markingSchemeUrl is string && data.markingSchemeUrl.size() <= 1000
         && (data.get('studentList', null) == null || data.studentList is list)
-        && data.createdAt is string && data.createdAt.size() <= 100
+        && data.createdAt is timestamp
         && data.keys().hasAll(['uid', 'title', 'questionPaperUrl', 'markingSchemeUrl', 'createdAt'])
-        && data.keys().size() >= 5 && data.keys().size() <= 6;
-    }
-
-    function isValidEvaluationQuestion(q) {
-      return q.questionNumber is string && q.questionNumber.size() <= 50
-        && q.transcription is string && q.transcription.size() <= 5000
-        && q.marksAwarded is number && q.maxMarks is number
-        && q.feedback is string && q.feedback.size() <= 2000
-        && q.pageNumber is number
-        && (q.get('boundingBox', null) == null || (q.boundingBox is list && q.boundingBox.size() == 4));
+        && data.keys().size() >= 5 && data.keys().size() <= 7;
     }
 
     function isValidSubmission(data) {
@@ -65,15 +56,14 @@ service cloud.firestore {
         && data.studentName is string && data.studentName.size() <= 200
         && data.bookletUrl is string && data.bookletUrl.size() <= 1000
         && data.status in ['pending', 'evaluated']
-        && data.createdAt is string && data.createdAt.size() <= 100
+        && data.createdAt is timestamp
         && (data.status == 'pending' || (
              data.totalMarks is number 
              && data.maxMarks is number 
              && data.evaluationData is map
-             && data.evaluationData.questions is list
            ))
         && data.keys().hasAll(['uid', 'examId', 'studentName', 'bookletUrl', 'status', 'createdAt'])
-        && data.keys().size() >= 6 && data.keys().size() <= 9;
+        && data.keys().size() >= 6 && data.keys().size() <= 10;
     }
 
     // --- Collections ---
@@ -87,7 +77,8 @@ service cloud.firestore {
     }
 
     match /exams/{examId} {
-      allow read: if isOwner(existing().uid);
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow get: if isOwner(existing().uid);
       allow create: if isSignedIn() && isValidExam(incoming());
       allow update: if isOwner(existing().uid) && isValidExam(incoming())
         && incoming().uid == existing().uid

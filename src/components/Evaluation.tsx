@@ -87,6 +87,10 @@ export const BookletAnnotator = React.memo(({ bookletUrl, questions }: BookletAn
         }
       } catch (err) {
         console.error("Error loading booklet:", err);
+        if (isMounted) {
+          setPages([]);
+          setError("Failed to fetch booklet. This may be due to CORS restrictions or an invalid URL.");
+        }
       } finally {
         if (isMounted) setLoading(false);
       }
@@ -98,6 +102,22 @@ export const BookletAnnotator = React.memo(({ bookletUrl, questions }: BookletAn
       objectUrls.forEach(url => URL.revokeObjectURL(url));
     };
   }, [bookletUrl]);
+
+  const [error, setError] = useState<string | null>(null);
+
+  if (error) {
+    return (
+      <div className="h-64 flex flex-col items-center justify-center space-y-4 bg-slate-900 border border-rose-900/30 rounded-[32px]">
+        <div className="p-4 bg-rose-500/10 rounded-full">
+          <Loader2 className="w-8 h-8 text-rose-500" />
+        </div>
+        <div className="text-center px-6">
+          <p className="text-rose-400 font-bold tracking-tight">Initialization Failed</p>
+          <p className="text-slate-500 text-xs mt-1 max-w-xs">{error}</p>
+        </div>
+      </div>
+    );
+  }
 
   if (loading && pages.length === 0) {
     return (
@@ -115,25 +135,41 @@ export const BookletAnnotator = React.memo(({ bookletUrl, questions }: BookletAn
   }
 
   return (
-    <div className="space-y-10 mt-16 pt-16 border-t border-slate-800/50">
-      <div className="flex items-center justify-between">
-        <h3 className="text-2xl font-black text-white tracking-tight">Evaluated Script</h3>
-        <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest bg-slate-900/50 px-4 py-2 rounded-full border border-slate-800">
-          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          Live Annotation Overlay
+    <div className="space-y-12 mt-20 pt-20 border-t border-slate-800/60 relative">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+             <div className="w-1 h-8 bg-blue-600 rounded-full" />
+             <h3 className="text-3xl font-display font-black text-white italic tracking-tighter leading-none">Booklet Master-Sync</h3>
+          </div>
+          <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em]">Temporal Frame Ingestion : Page {pages.length}</p>
+        </div>
+        <div className="flex items-center gap-4 text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.2em] bg-slate-950/50 backdrop-blur-xl px-5 py-3 rounded-2xl border border-slate-800/60 shadow-xl">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="text-emerald-400">Semantic Layer Active</span>
+          </div>
+          <div className="w-px h-3 bg-slate-800" />
+          <span>GPU Raster Enabled</span>
         </div>
       </div>
       
-      <div className="space-y-12">
+      <div className="space-y-16">
         {pages.map((page, idx) => (
-          <div key={idx} className="group relative border border-slate-800 rounded-[40px] overflow-hidden bg-white shadow-2xl transition-all hover:border-blue-500/30">
-            <img 
-              src={page.url} 
-              alt={`Page ${idx + 1}`} 
-              className="w-full h-auto select-none" 
-              referrerPolicy="no-referrer" 
-              loading="lazy"
-            />
+          <div key={idx} className="group relative border border-slate-800/80 rounded-[48px] overflow-hidden bg-slate-950 shadow-[0_40px_100px_rgba(0,0,0,0.6)] transition-all hover:border-blue-500/40 p-1">
+            <div className="relative rounded-[46px] overflow-hidden bg-white">
+              <img 
+                src={page.url} 
+                alt={`Page ${idx + 1}`} 
+                className="w-full h-auto select-none opacity-90 group-hover:opacity-100 transition-opacity duration-700" 
+                referrerPolicy="no-referrer" 
+                loading="lazy"
+              />
+              <div className="absolute top-6 left-6 px-4 py-2 bg-slate-900/80 backdrop-blur-md rounded-xl text-[10px] font-mono font-bold text-white border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity">
+                FRAME_ID: {idx + 1}
+              </div>
+            </div>
+
             {questions.filter(q => q.pageNumber === idx + 1).map((q, qIdx) => {
               if (!q.boundingBox) return null;
               const [ymin, xmin, ymax, xmax] = q.boundingBox;
@@ -144,21 +180,25 @@ export const BookletAnnotator = React.memo(({ bookletUrl, questions }: BookletAn
                 <div 
                   key={qIdx}
                   className={cn(
-                    "absolute border-2 rounded pointer-events-none flex flex-col items-start",
-                    isFullMarks ? "border-green-500 bg-green-500/10" : isZeroMarks ? "border-red-500 bg-red-500/10" : "border-amber-500 bg-amber-500/10"
+                    "absolute rounded-lg pointer-events-none flex flex-col items-start border-2 shadow-[0_0_30px_rgba(0,0,0,0.3)] transition-all duration-500 group-hover:scale-[1.01]",
+                    isFullMarks ? "border-emerald-500 bg-emerald-500/5 shadow-emerald-500/10" : 
+                    isZeroMarks ? "border-rose-500 bg-rose-500/5 shadow-rose-500/10" : 
+                    "border-amber-500 bg-amber-500/5 shadow-amber-500/10"
                   )}
                   style={{
-                    top: `${ymin / 10}%`,
-                    left: `${xmin / 10}%`,
-                    width: `${(xmax - xmin) / 10}%`,
-                    height: `${(ymax - ymin) / 10}%`,
+                    top: `calc(${ymin / 10}% + 4px)`,
+                    left: `calc(${xmin / 10}% + 4px)`,
+                    width: `calc(${(xmax - xmin) / 10}% - 8px)`,
+                    height: `calc(${(ymax - ymin) / 10}% - 8px)`,
                   }}
                 >
                   <div className={cn(
-                    "px-1.5 py-0.5 rounded-br text-[10px] font-bold text-white shadow-sm",
-                    isFullMarks ? "bg-green-500" : isZeroMarks ? "bg-red-500" : "bg-amber-500"
+                    "px-2.5 py-1 rounded-br-xl rounded-tl-md text-[10px] font-black text-white shadow-xl flex items-center gap-2",
+                    isFullMarks ? "bg-emerald-600" : isZeroMarks ? "bg-rose-600" : "bg-amber-600"
                   )}>
-                    Q{q.questionNumber}: {q.marksAwarded}/{q.maxMarks}
+                    <span className="opacity-50 font-mono">Q{q.questionNumber}</span>
+                    <span className="w-1 h-3 bg-white/30 rounded-full" />
+                    <span>{q.marksAwarded} / {q.maxMarks}</span>
                   </div>
                 </div>
               );

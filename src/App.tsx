@@ -27,8 +27,7 @@ import {
   Info,
   ShieldCheck,
   Cpu,
-  BookMarked,
-  ExternalLink
+  BookMarked
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useDropzone } from "react-dropzone";
@@ -48,33 +47,29 @@ const loadPdfjs = async () => {
 };
 
 import { StatCard, FileUpload, Toast } from "./components/Common";
-import { MultiFileUpload, UploadProgressOverlay } from "./components/Upload";
-import { 
-  DashboardView, 
-  ExamItem, 
-  SubmissionsView, 
-  AboutView,
-  SettingsView
-} from "./components/Views";
+import { MultiFileUpload } from "./components/Upload";
 
 const BookletAnnotator = React.lazy(() => import("./components/Evaluation").then(m => ({ default: m.BookletAnnotator })));
+const DashboardView = React.lazy(() => import("./components/DashboardView").then(m => ({ default: m.DashboardView })));
+const ExamItem = React.lazy(() => import("./components/ExamItem").then(m => ({ default: m.ExamItem })));
+const SubmissionsView = React.lazy(() => import("./components/SubmissionsView").then(m => ({ default: m.SubmissionsView })));
+const AboutView = React.lazy(() => import("./components/AboutView").then(m => ({ default: m.AboutView })));
 
-import { auth, db, storage, signInWithGoogle, logout, createExam, updateExam, deleteExam, createSubmission, updateSubmission, deleteSubmission, handleFirestoreError, OperationType, testConnection, signUpWithEmail, loginWithEmail, resetPassword } from "./firebase";
+import { auth, db, storage, signInWithGoogle, logout, createExam, updateExam, deleteExam, createSubmission, updateSubmission, deleteSubmission, handleFirestoreError, OperationType, testConnection } from "./firebase";
 import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from "firebase/storage";
-import imageCompression from 'browser-image-compression';
 import { cn, fileToBase64, fixHtml2CanvasOklch } from "./lib/utils";
 import { Exam, Submission, AppFeature, EvaluationQuestion } from "./types";
 
 // --- Utils ---
 
-const validateFile = (file: File, allowedTypes: string[]): string | null => {
+const validateFile = async (file: File, allowedTypes: string[]): Promise<string | null> => {
   if (!file) return "No file selected.";
   
   const isAllowed = allowedTypes.some(type => {
+    if (type === '*/*') return true;
     if (type.endsWith('/*')) {
       return file.type.startsWith(type.replace('/*', ''));
     }
-    // Check extension as fallback for some browsers/files
     const ext = "." + file.name.split('.').pop()?.toLowerCase();
     return file.type === type || ext === type.toLowerCase();
   });
@@ -87,22 +82,57 @@ const validateFile = (file: File, allowedTypes: string[]): string | null => {
     return `File "${file.name}" appears to be empty or corrupted.`;
   }
 
+  // Deeper PDF Validation
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (isPdf) {
+    try {
+      await getPdfMetadata(file);
+    } catch (err: any) {
+      return err.message || "Invalid PDF file.";
+    }
+  }
+
   return null;
 };
 
-const compressFile = async (file: File, isForAI: boolean = false): Promise<File> => {
-  // Only compress images
-  if (!file.type.startsWith('image/')) return file;
-
-  const options = {
-    maxSizeMB: isForAI ? 0.2 : 0.7, // 0.2MB for AI extraction is plenty
-    maxWidthOrHeight: isForAI ? 1000 : 1600, // Sufficient for AI OCR
-    useWebWorker: true,
-    initialQuality: isForAI ? 0.5 : 0.7,
-    alwaysKeepResolution: false
-  };
+const getPdfMetadata = async (file: File): Promise<{ pageCount: number } | null> => {
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (!isPdf) return null;
 
   try {
+    const pdfjs = await loadPdfjs();
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    return {
+      pageCount: pdf.numPages
+    };
+  } catch (error) {
+    console.error("PDF Validation Error:", error);
+    throw new Error(`The file "${file.name}" is not a valid PDF or is corrupted.`);
+  }
+};
+
+const compressFile = async (file: File, isForAI: boolean = false): Promise<File> => {
+  // Check if file is small enough to skip compression
+  const SKIP_COMPRESSION_SIZE = isForAI ? 150 * 1024 : 500 * 1024; // 150KB for AI, 500KB for display
+  if (file.size < SKIP_COMPRESSION_SIZE) return file;
+
+  // Only compress images
+  const isImage = file.type.startsWith('image/') || 
+                 /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name);
+                 
+  if (!isImage) return file;
+
+  try {
+    const imageCompression = (await import('browser-image-compression')).default;
+    const options = {
+      maxSizeMB: isForAI ? 0.2 : 0.7, 
+      maxWidthOrHeight: isForAI ? 1000 : 1600, 
+      useWebWorker: true,
+      initialQuality: isForAI ? 0.5 : 0.7,
+      alwaysKeepResolution: false
+    };
+
     const compressedBlob = await imageCompression(file, options);
     return new File([compressedBlob], file.name, {
       type: file.type,
@@ -115,12 +145,21 @@ const compressFile = async (file: File, isForAI: boolean = false): Promise<File>
 };
 
 const getFirstPageAsImage = async (file: File): Promise<{ data: string; mimeType: string }> => {
-  if (file.type.startsWith('image/')) {
+  const isImage = file.type.startsWith('image/') || 
+                 /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name);
+
+  if (isImage) {
     const compressed = await compressFile(file, true);
-    return fileToBase64(compressed);
+    const b64 = await fileToBase64(compressed);
+    // Ensure we have a valid image mime type for Gemini
+    if (!b64.mimeType.startsWith('image/')) {
+      b64.mimeType = 'image/jpeg'; 
+    }
+    return b64;
   }
 
-  if (file.type === 'application/pdf') {
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (isPdf) {
     try {
       const pdfjs = await loadPdfjs();
       const arrayBuffer = await file.arrayBuffer();
@@ -167,35 +206,11 @@ const runWithConcurrency = async <T, R>(
   return results;
 };
 
-const uploadFile = async (file: File, path: string, onProgress?: (progress: number) => void): Promise<string> => {
+const uploadFile = async (file: File, path: string): Promise<string> => {
   const storageRef = ref(storage, `${path}/${Date.now()}_${file.name}`);
   
   try {
-    if (onProgress) {
-      const uploadTask = uploadBytesResumable(storageRef, file);
-      return new Promise((resolve, reject) => {
-        uploadTask.on('state_changed', 
-          (snapshot) => {
-            const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-            onProgress(progress);
-          }, 
-          (error) => {
-            console.error("Upload Task Error:", error);
-            if (error.code === 'storage/unauthorized') {
-              reject(new Error("Permission denied: You don't have access to upload to this location."));
-            } else if (error.code === 'storage/quota-exceeded') {
-              reject(new Error("Storage quota exceeded. Please contact support."));
-            } else {
-              reject(new Error(`Upload failed for "${file.name}": ${error.message}`));
-            }
-          }, 
-          () => {
-            getDownloadURL(uploadTask.snapshot.ref).then(resolve).catch(reject);
-          }
-        );
-      });
-    }
-
+    // Fast direct upload path
     await uploadBytes(storageRef, file);
     return getDownloadURL(storageRef);
   } catch (error: any) {
@@ -274,8 +289,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [activeFeature, setActiveFeature] = useState<AppFeature>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(window.innerWidth >= 1024);
-  const [userApiKey, setUserApiKey] = useState<string>(localStorage.getItem("USER_GEMINI_KEY") || "");
-  const [aiProvider, setAiProvider] = useState<"google" | "openai">((localStorage.getItem("AI_PROVIDER") as any) || "google");
   
   // Data States
   const [exams, setExams] = useState<Exam[]>([]);
@@ -359,17 +372,11 @@ export default function App() {
     [submissions, selectedSubmissionId]
   );
   
-  // Auth State
-  const [authMode, setAuthMode] = useState<"login" | "signup" | "forgot">("login");
-  const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authName, setAuthName] = useState("");
-  const [authErrorLocal, setAuthErrorLocal] = useState<string | null>(null);
-  const [authLoading, setAuthLoading] = useState(false);
-  const [resetSent, setResetSent] = useState(false);
-
   const reportRef = useRef<HTMLDivElement>(null);
   const bulkExportRef = useRef<HTMLDivElement>(null);
+
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -425,7 +432,14 @@ export default function App() {
     if (!user) return;
     const q = query(collection(db, "exams"), where("uid", "==", user.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setExams(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Exam)));
+      setExams(snapshot.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
+        } as Exam;
+      }));
     }, (err) => {
       console.error("Exams Snapshot Error:", err);
       setError("Failed to sync exams. Please check your connection.");
@@ -437,7 +451,14 @@ export default function App() {
     if (!user) return;
     const q = query(collection(db, "submissions"), where("uid", "==", user.uid));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setSubmissions(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Submission)));
+      setSubmissions(snapshot.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
+        } as Submission;
+      }));
     }, (err) => {
       console.error("Submissions Snapshot Error:", err);
       setError("Failed to sync submissions. Please check your connection.");
@@ -457,8 +478,8 @@ export default function App() {
       return;
     }
 
-    const qpError = validateFile(newExamQP, ['application/pdf', 'image/*']);
-    const msError = validateFile(newExamMS, ['application/pdf', 'image/*']);
+    const qpError = await validateFile(newExamQP, ['*/*']);
+    const msError = await validateFile(newExamMS, ['*/*']);
     
     if (qpError || msError) {
       showToast(qpError || msError, "error");
@@ -478,22 +499,17 @@ export default function App() {
     
     try {
       setUploadStatus("Compressing files...");
-      const [compressedQP, compressedMS] = await Promise.all([
+      const [compressedQP, compressedMS, qpMeta, msMeta] = await Promise.all([
         compressFile(newExamQP),
-        compressFile(newExamMS)
+        compressFile(newExamMS),
+        getPdfMetadata(newExamQP),
+        getPdfMetadata(newExamMS)
       ]);
 
-      setUploadStatus("Uploading to Storage...");
-      let qpProgress = 0;
-      let msProgress = 0;
-
-      const updateOverallProgress = () => {
-        setUploadProgress((qpProgress + msProgress) / 2);
-      };
-
+      setUploadStatus("Uploading...");
       const [qpUrl, msUrl] = await Promise.all([
-        uploadFile(compressedQP, `exams/${user.uid}/qp`, (p) => { qpProgress = p; updateOverallProgress(); }),
-        uploadFile(compressedMS, `exams/${user.uid}/ms`, (p) => { msProgress = p; updateOverallProgress(); })
+        uploadFile(compressedQP, `exams/${user.uid}/qp`),
+        uploadFile(compressedMS, `exams/${user.uid}/ms`)
       ]);
       
       setUploadStatus("Finalizing exam...");
@@ -505,7 +521,8 @@ export default function App() {
         questionPaperUrl: qpUrl,
         markingSchemeUrl: msUrl,
         studentList: newExamStudentList.split('\n').map(s => s.trim()).filter(s => s !== ""),
-        createdAt: new Date().toISOString()
+        qpPageCount: qpMeta?.pageCount,
+        msPageCount: msMeta?.pageCount
       });
       
       setIsCreatingExam(false);
@@ -574,16 +591,15 @@ export default function App() {
       return;
     }
 
-    const bookletError = validateFile(newBooklet, ['application/pdf', 'image/*']);
+    const bookletError = await validateFile(newBooklet, ['*/*']);
     if (bookletError) {
       showToast(bookletError, "error");
       return;
     }
 
-    // 10MB limit as requested
-    const MAX_FILE_SIZE = 10 * 1024 * 1024; 
+    const MAX_FILE_SIZE = 15 * 1024 * 1000; 
     if (newBooklet.size > MAX_FILE_SIZE) {
-      showToast("Booklet file is too large. It must be under 10MB.", "error");
+      showToast("Booklet file is too large. It must be under 15MB.", "error");
       return;
     }
 
@@ -592,45 +608,56 @@ export default function App() {
     setUploadStatus("Preparing booklet...");
     
     try {
-      setUploadStatus("Processing booklet...");
-      
-      // Start compression and identification concurrently
-      // Optimization: extract only first page/compressed for AI to save time
-      const [compressedBooklet, bookletDataForAI] = await Promise.all([
+      // 1. Kick off compression, AI extraction, and metadata extraction concurrently
+      const [compressedBooklet, bookletDataForAI, bookletMeta] = await Promise.all([
         compressFile(newBooklet),
-        !studentName ? getFirstPageAsImage(newBooklet) : Promise.resolve(null)
+        (!studentName) ? getFirstPageAsImage(newBooklet) : Promise.resolve(null),
+        getPdfMetadata(newBooklet)
       ]);
 
-      if (!studentName && bookletDataForAI) {
-        setUploadStatus("Identifying student...");
-        try {
-          const details = await extractStudentDetails(bookletDataForAI);
-          studentName = details.studentName;
-        } catch (err) {
+      // 2. Start upload immediately after compression, don't wait for AI
+      setUploadStatus("Uploading...");
+      const uploadPromise = uploadFile(compressedBooklet, `submissions/${user!.uid}/${selectedExamId}`);
+
+      // 3. Extract student name if needed
+      let extractedName = studentName;
+      if (!extractedName && bookletDataForAI) {
+        setUploadStatus("Scanning...");
+        const aiPromise = extractStudentDetails(bookletDataForAI).catch(err => {
           console.warn("AI extraction failed:", err);
-        }
+          return { studentName: null };
+        });
+        
+        // Use filename as fallback while AI is working
+        const tempName = newBooklet.name.replace(/\.[^/.]+$/, "").replace(/_/g, " ").replace(/-/g, " ");
+        
+        // Wait for both upload and AI (or use fallback)
+        const [bookletUrl, aiResult] = await Promise.all([uploadPromise, aiPromise]);
+        extractedName = aiResult.studentName || tempName;
+
+        setUploadStatus("Finishing...");
+        await createSubmission({
+          uid: user!.uid,
+          examId: selectedExamId,
+          studentName: extractedName,
+          bookletUrl: bookletUrl,
+          status: "pending",
+          pageCount: bookletMeta?.pageCount
+        });
+      } else {
+        // If name already provided, just wait for upload
+        const bookletUrl = await uploadPromise;
+        setUploadStatus("Finishing...");
+        await createSubmission({
+          uid: user!.uid,
+          examId: selectedExamId,
+          studentName: extractedName || (newBooklet.name.replace(/\.[^/.]+$/, "")),
+          bookletUrl: bookletUrl,
+          status: "pending",
+          pageCount: bookletMeta?.pageCount
+        });
       }
 
-      if (!studentName) {
-        showToast("Could not identify student. Please enter manually.", "error");
-        setIsUploading(false);
-        return;
-      }
-
-      setUploadStatus("Uploading to Storage...");
-      const bookletUrl = await uploadFile(compressedBooklet, `submissions/${user!.uid}/${selectedExamId}`, (p) => setUploadProgress(p));
-      
-      setUploadStatus("Finalizing submission...");
-      setUploadProgress(100);
-
-      await createSubmission({
-        uid: user!.uid,
-        examId: selectedExamId,
-        studentName: studentName,
-        bookletUrl: bookletUrl,
-        status: "pending",
-        createdAt: new Date().toISOString()
-      });
       setIsAddingSubmission(false);
       setNewStudentName("");
       setNewBooklet(null);
@@ -638,14 +665,13 @@ export default function App() {
       console.error("Add Submission Error:", error);
       let message = "Failed to add submission. ";
       
-      if (error.message?.includes("corrupted") || error.message?.includes("not a valid image")) {
-        message += "The file appears to be corrupted or is not a valid image.";
-      } else if (error.message?.includes("quota")) {
+      if (error.message?.includes("quota")) {
         message += "Storage quota exceeded.";
       } else {
+        // Try to parse JSON error if it came from handleFirestoreError
         try {
           const errData = JSON.parse(error.message);
-          message += `Error: ${errData.error || "Unknown error"}`;
+          message += errData.error || "An unexpected error occurred.";
         } catch (e) {
           message += error.message || "An unexpected error occurred.";
         }
@@ -669,16 +695,10 @@ export default function App() {
     let successCount = 0;
     let failCount = 0;
     const totalFiles = bulkFiles.length;
-    const fileProgresses: { [key: string]: number } = {};
-
-    const updateOverallProgress = () => {
-      const totalProgress = Object.values(fileProgresses).reduce((a, b) => a + b, 0);
-      setUploadProgress(totalProgress / totalFiles);
-    };
 
     try {
       const uploadSingleFile = async (file: File) => {
-        const fileError = validateFile(file, ['application/pdf', 'image/*']);
+        const fileError = await validateFile(file, ['*/*']);
         if (fileError) {
           console.warn(`Skipping ${file.name}: ${fileError}`);
           failCount++;
@@ -695,13 +715,13 @@ export default function App() {
         // Use filename immediately for maximum speed
         const tempStudentName = file.name.replace(/\.[^/.]+$/, "").replace(/_/g, " ").replace(/-/g, " ");
         
-        // Fast compression
-        const compressedFile = await compressFile(file);
+        // Fast compression and metadata extraction
+        const [compressedFile, pdfMeta] = await Promise.all([
+          compressFile(file),
+          getPdfMetadata(file)
+        ]);
         
-        const bookletUrl = await uploadFile(compressedFile, `submissions/${user.uid}/${selectedExamId}`, (p) => {
-          fileProgresses[file.name] = p;
-          updateOverallProgress();
-        });
+        const bookletUrl = await uploadFile(compressedFile, `submissions/${user.uid}/${selectedExamId}`);
 
         const newSubmission = await createSubmission({
           uid: user.uid,
@@ -709,14 +729,12 @@ export default function App() {
           studentName: tempStudentName,
           bookletUrl: bookletUrl,
           status: "pending",
-          createdAt: new Date().toISOString()
+          pageCount: pdfMeta?.pageCount
         });
         
         if (!newSubmission) throw new Error("Failed to create submission");
 
         successCount++;
-        fileProgresses[file.name] = 100;
-        updateOverallProgress();
 
         // QUEUE AI Background Scanning - doesn't block the upload loop
         if (useAIForBulkNames) {
@@ -736,7 +754,7 @@ export default function App() {
       };
 
       // Process with concurrency limit to avoid freezing the browser
-      await runWithConcurrency(bulkFiles, 3, async (file) => {
+      await runWithConcurrency(bulkFiles, 5, async (file) => {
         if (file.name.toLowerCase().endsWith('.zip')) {
           setUploadStatus(`Extracting ${file.name}...`);
           const JSZip = (await import("jszip")).default;
@@ -771,61 +789,6 @@ export default function App() {
       setIsUploading(false);
       setUploadProgress(0);
       setUploadStatus("");
-    }
-  };
-
-  const handleExportAllData = () => {
-    try {
-      const exportData = {
-        version: "1.0.0",
-        timestamp: new Date().toISOString(),
-        exams,
-        submissions
-      };
-      
-      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `grademaster_backup_${new Date().toISOString().split('T')[0]}.json`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      
-      showToast("All data successfully exported.", "success");
-    } catch (err) {
-      showToast("Failed to export data.", "error");
-    }
-  };
-
-  const handleImportData = async (file: File) => {
-    if (!user) return;
-    try {
-      const text = await file.text();
-      const importData = JSON.parse(text);
-      
-      if (!importData.exams || !importData.submissions) {
-        throw new Error("Invalid backup file format.");
-      }
-
-      showToast("Restoring records...", "loading");
-      
-      // We don't want to just overwrite everything blindly, but for "Indigenous" restoration
-      // we'll batch create them.
-      for (const exam of importData.exams) {
-        const { id, ...examData } = exam;
-        await createExam({ ...examData, uid: user.uid });
-      }
-      
-      for (const sub of importData.submissions) {
-        const { id, ...subData } = sub;
-        await createSubmission({ ...subData, uid: user.uid });
-      }
-      
-      showToast(`Restored ${importData.exams.length} exams and ${importData.submissions.length} submissions.`, "success");
-    } catch (err: any) {
-      showToast(`Import failed: ${err.message}`, "error");
     }
   };
 
@@ -915,7 +878,7 @@ export default function App() {
         fetchFileData(exam.markingSchemeUrl)
       ]);
 
-      await runWithConcurrency(pending, 2, async (submission) => {
+      await runWithConcurrency(pending, 4, async (submission) => {
         try {
           // Fetch only the student's unique booklet data
           const booklet = await fetchFileData(submission.bookletUrl);
@@ -1094,6 +1057,21 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  const handleBulkStatusUpdate = async (ids: string[], status: "pending" | "evaluated") => {
+    setLoading(true);
+    let success = 0;
+    try {
+      await Promise.all(ids.map(id => updateSubmission(id, { status })));
+      success = ids.length;
+      showToast(`Successfully updated ${success} submissions to ${status}.`, "success");
+    } catch (err: any) {
+      console.error("Bulk Status Update Error:", err);
+      showToast("Failed to update some submissions.", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleBulkExportPDFs = async () => {
     const evaluatedSubmissions = submissions.filter(s => s.examId === selectedExamId && s.status === "evaluated");
     if (evaluatedSubmissions.length === 0) {
@@ -1211,7 +1189,7 @@ export default function App() {
           
           <div className="text-center space-y-4">
             <h3 className="text-4xl font-extrabold text-white tracking-tighter">
-              GradeMaster <span className="text-blue-500 font-black">AI</span>
+              GradeMaster
             </h3>
             <div className="flex items-center justify-center gap-3">
               <p className="text-slate-500 text-sm font-bold uppercase tracking-widest">Initializing Intelligence</p>
@@ -1240,176 +1218,115 @@ export default function App() {
   }
 
   if (!user) {
-    const handleEmailAuth = async (e: React.FormEvent) => {
-      e.preventDefault();
-      setAuthErrorLocal(null);
-      setAuthLoading(true);
-      try {
-        if (authMode === "login") {
-          await loginWithEmail(authEmail, authPassword);
-        } else if (authMode === "signup") {
-          if (!authName) throw new Error("Please enter your name.");
-          await signUpWithEmail(authEmail, authPassword, authName);
-        } else if (authMode === "forgot") {
-          await resetPassword(authEmail);
-          setResetSent(true);
-        }
-      } catch (err: any) {
-        setAuthErrorLocal(err.message || "Authentication failed.");
-      } finally {
-        setAuthLoading(false);
-      }
-    };
-
     return (
-      <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-950 p-6 overflow-y-auto">
+      <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-950 p-6 overflow-hidden relative">
+        {/* Background elements */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-blue-600/5 rounded-full blur-[120px] pointer-events-none" />
+        <div className="absolute top-0 left-0 w-full h-full opacity-[0.02] pointer-events-none" style={{ backgroundImage: 'radial-gradient(#fff 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
+
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 40 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full"
+          transition={{ duration: 0.8, ease: "easeOut" }}
+          className="max-w-md w-full relative z-10"
         >
-          <div className="text-center mb-8">
-            <div className="w-20 h-20 bg-blue-600/20 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-2xl shadow-blue-500/10">
-              <GraduationCap className="w-10 h-10 text-blue-500" />
+          <div className="text-center mb-12">
+            <motion.div 
+              initial={{ scale: 0.8, rotate: -10 }}
+              animate={{ scale: 1, rotate: 0 }}
+              transition={{ delay: 0.2, type: "spring", stiffness: 100 }}
+              className="w-24 h-24 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-[32px] flex items-center justify-center mx-auto mb-8 shadow-[0_20px_50px_rgba(37,99,235,0.3)] relative group cursor-default"
+            >
+              <GraduationCap className="w-12 h-12 text-white" />
+              <div className="absolute inset-0 bg-white/20 rounded-[32px] opacity-0 group-hover:opacity-100 transition-opacity" />
+            </motion.div>
+            <h1 className="text-5xl font-display font-black text-white mb-4 tracking-tighter italic">GradeMaster</h1>
+            <div className="flex items-center justify-center gap-3">
+               <div className="h-px w-8 bg-slate-800" />
+               <p className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.4em]">Autonomous Grading Core</p>
+               <div className="h-px w-8 bg-slate-800" />
             </div>
-            <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">GradeMaster AI</h1>
-            <p className="text-slate-400 text-sm leading-relaxed">
-              {authMode === "login" && "Welcome back! Please sign in to continue."}
-              {authMode === "signup" && "Create your account to start evaluating exams."}
-              {authMode === "forgot" && "Enter your email to receive a reset link."}
-            </p>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 rounded-[32px] p-8 space-y-6 shadow-2xl">
-            {resetSent && authMode === "forgot" ? (
-              <div className="text-center space-y-4 py-4">
-                <div className="w-12 h-12 bg-green-500/20 rounded-full flex items-center justify-center mx-auto">
-                  <CheckCircle className="w-6 h-6 text-green-500" />
+          <div className="bg-slate-900/40 backdrop-blur-2xl border border-slate-800/60 rounded-[48px] p-10 space-y-8 shadow-[0_40px_100px_rgba(0,0,0,0.6)] relative overflow-hidden technical-border">
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent" />
+            
+            <div className="space-y-2 text-center">
+              <p className="text-slate-400 font-medium leading-relaxed">
+                Connect your educator credentials to access the semantic evaluation pipeline.
+              </p>
+            </div>
+
+            {authError && (
+              <motion.div 
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="p-5 bg-rose-500/5 border border-rose-500/20 rounded-2xl flex items-start gap-4 text-rose-400 text-xs font-bold leading-relaxed"
+              >
+                <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="uppercase tracking-widest text-[10px]">Security Alert</p>
+                  <p className="font-medium opacity-80">{authError}</p>
                 </div>
-                <p className="text-sm text-slate-300">Password reset link has been sent to your email.</p>
-                <button 
-                  onClick={() => { setAuthMode("login"); setResetSent(false); }}
-                  className="text-blue-500 font-bold text-sm hover:underline"
-                >
-                  Back to Login
-                </button>
-              </div>
-            ) : (
-              <form onSubmit={handleEmailAuth} className="space-y-4">
-                {authErrorLocal && (
-                  <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex flex-col gap-2 text-red-400 text-xs font-bold animate-shake">
-                    <div className="flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                      <span>{authErrorLocal}</span>
-                    </div>
-                    {authErrorLocal.includes("Network request failed") && (
-                      <button 
-                        type="button"
-                        onClick={() => window.open(window.location.href, '_blank')}
-                        className="mt-2 py-2.5 bg-white/5 border border-white/10 rounded-xl text-center hover:bg-white/10 transition-all active:scale-95 flex items-center justify-center gap-2"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        Fix: Open in New Tab
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {authMode === "signup" && (
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Full Name</label>
-                    <input 
-                      type="text" 
-                      required
-                      value={authName}
-                      onChange={(e) => setAuthName(e.target.value)}
-                      placeholder="John Doe"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm focus:border-blue-600 outline-none transition-colors text-white placeholder:text-slate-700"
-                    />
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Email Address</label>
-                  <input 
-                    type="email" 
-                    required
-                    value={authEmail}
-                    onChange={(e) => setAuthEmail(e.target.value)}
-                    placeholder="name@university.edu"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm focus:border-blue-600 outline-none transition-colors text-white placeholder:text-slate-700"
-                  />
-                </div>
-
-                {authMode !== "forgot" && (
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center px-1">
-                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Password</label>
-                      {authMode === "login" && (
-                        <button 
-                          type="button"
-                          onClick={() => setAuthMode("forgot")}
-                          className="text-[10px] font-bold text-blue-500 hover:underline"
-                        >
-                          Forgot?
-                        </button>
-                      )}
-                    </div>
-                    <input 
-                      type="password" 
-                      required
-                      value={authPassword}
-                      onChange={(e) => setAuthPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-sm focus:border-blue-600 outline-none transition-colors text-white placeholder:text-slate-700"
-                    />
-                  </div>
-                )}
-
-                <button 
-                  type="submit"
-                  disabled={authLoading}
-                  className="w-full py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all active:scale-95 shadow-xl shadow-blue-500/20 flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {authLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <LogIn className="w-5 h-5" />}
-                  {authMode === "login" ? "Sign In" : authMode === "signup" ? "Create Account" : "Send Reset Link"}
-                </button>
-              </form>
+              </motion.div>
             )}
 
-            <div className="relative flex items-center gap-4 text-slate-700">
-              <div className="flex-1 h-px bg-slate-800" />
-              <span className="text-[10px] font-black uppercase tracking-widest">Optional</span>
-              <div className="flex-1 h-px bg-slate-800" />
-            </div>
-
             <button
-              onClick={() => signInWithGoogle().catch(err => setAuthErrorLocal(err.message))}
-              className="w-full py-3.5 px-6 bg-slate-800 text-white/70 text-sm font-bold rounded-2xl flex items-center justify-center gap-3 hover:bg-slate-700 transition-all active:scale-95 border border-slate-700"
+              onClick={async () => {
+                if (isSigningIn) return;
+                setIsSigningIn(true);
+                setAuthError(null);
+                try {
+                  await signInWithGoogle();
+                } catch (err: any) {
+                  console.error(err);
+                  if (err.code === 'auth/cancelled-popup-request') {
+                    setAuthError("A sign-in request is already pending.");
+                  } else if (err.code === 'auth/popup-closed-by-user') {
+                    setAuthError("Sign-in process interrupted.");
+                  } else if (err.code === 'auth/blocked-by-popup-blocker') {
+                    setAuthError("Popup blocked. Please adjust browser settings.");
+                  } else {
+                    setAuthError(err.message || "Credential verification failed.");
+                  }
+                } finally {
+                  setIsSigningIn(false);
+                }
+              }}
+              disabled={isSigningIn}
+              className="w-full h-20 bg-white text-black font-black uppercase tracking-[0.2em] text-[12px] rounded-[28px] flex items-center justify-center gap-4 hover:bg-slate-100 transition-all active:scale-[0.98] shadow-2xl shadow-blue-500/5 disabled:opacity-50 disabled:cursor-not-allowed group"
             >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-4 h-4 opacity-50 gray" style={{ filter: 'grayscale(1)' }} alt="" />
-              Social Login (Google)
-            </button>
-
-            <div className="text-center pt-2">
-              <button 
-                onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")}
-                className="text-sm font-bold text-slate-400 hover:text-white transition-colors"
-              >
-                {authMode === "login" ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
-              </button>
-              {authMode === "forgot" && (
-                <div className="mt-2 text-center">
-                  <button 
-                    onClick={() => setAuthMode("login")}
-                    className="text-xs font-bold text-slate-500 hover:text-white transition-colors"
-                  >
-                    Back to Login
-                  </button>
-                </div>
+              {isSigningIn ? (
+                <Loader2 className="w-6 h-6 animate-spin" />
+              ) : (
+                <>
+                  <div className="w-8 h-8 bg-slate-950 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
+                    <LogIn className="w-4 h-4 text-white" />
+                  </div>
+                  <span>Authenticate via Google</span>
+                </>
               )}
+            </button>
+            
+            <div className="pt-4 flex flex-col items-center gap-4">
+               <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-blue-500/50" />
+                  <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">Secure TLS 1.3 Active</p>
+               </div>
+               <p className="text-[10px] text-center text-slate-700 font-mono uppercase tracking-tighter max-w-[200px]">
+                 Enterprise encryption for academic integrity and data sovereignty.
+               </p>
             </div>
           </div>
+          
+          <motion.p 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 1 }}
+            className="mt-12 text-center text-slate-600 font-mono text-[10px] uppercase tracking-[0.2em]"
+          >
+            © 2024 GradeMaster • Semantic Logic V2
+          </motion.p>
         </motion.div>
       </div>
     );
@@ -1441,7 +1358,7 @@ export default function App() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={() => { if (window.innerWidth < 1024) setSidebarOpen(false); }}
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[45] lg:hidden"
+            className="fixed inset-0 bg-black/70 backdrop-blur-md z-[45] lg:hidden"
           />
         )}
       </AnimatePresence>
@@ -1453,84 +1370,100 @@ export default function App() {
             initial={{ x: -300 }}
             animate={{ x: 0 }}
             exit={{ x: -300 }}
-            className="fixed lg:relative w-72 h-full bg-slate-900 border-r border-slate-800 flex flex-col z-50 shadow-2xl lg:shadow-none"
+            transition={{ type: "spring", damping: 25, stiffness: 200 }}
+            className="fixed lg:relative w-80 h-full bg-slate-900/90 backdrop-blur-3xl border-r border-slate-800 flex flex-col z-50 shadow-2xl lg:shadow-none"
           >
-            <div className="p-6 lg:p-8 flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/40">
-                  <GraduationCap className="w-6 h-6 text-white" />
+            <div className="p-8 pb-4 flex items-center justify-between mb-8">
+              <div className="flex items-center gap-4 group cursor-default">
+                <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-900/30 group-hover:scale-110 transition-transform duration-500">
+                  <GraduationCap className="w-7 h-7 text-white" />
                 </div>
-                <h1 className="text-xl font-bold tracking-tight text-white">GradeMaster</h1>
+                <div>
+                  <h1 className="text-xl font-display font-black tracking-tight text-white italic leading-tight">GradeMaster</h1>
+                  <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">Control Panel v2.1</p>
+                </div>
               </div>
               <button 
                 onClick={() => setSidebarOpen(false)}
-                className="p-2 hover:bg-slate-800 rounded-lg lg:hidden"
+                className="p-2.5 hover:bg-slate-800 rounded-xl lg:hidden transition-colors"
+                aria-label="Close Sidebar"
               >
                 <X className="w-5 h-5 text-slate-400" />
               </button>
             </div>
 
-            <nav className="flex-1 px-4 space-y-2 overflow-y-auto custom-scrollbar">
-              <SidebarItem 
-                icon={LayoutDashboard} 
-                label="Dashboard" 
-                active={activeFeature === "dashboard"} 
-                onClick={() => { setActiveFeature("dashboard"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
-              />
-              <SidebarItem 
-                icon={BookOpen} 
-                label="My Exams" 
-                active={activeFeature === "exams"} 
-                onClick={() => { setActiveFeature("exams"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
-              />
-              <SidebarItem 
-                icon={FileCheck} 
-                label="Submissions" 
-                active={activeFeature === "submissions"} 
-                onClick={() => { setActiveFeature("submissions"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
-              />
-              <SidebarItem 
-                icon={Users} 
-                label="Students" 
-                active={activeFeature === "students"} 
-                onClick={() => { setActiveFeature("students"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
-              />
-              <SidebarItem 
-                icon={Info} 
-                label="About App" 
-                active={activeFeature === "about"} 
-                onClick={() => { setActiveFeature("about"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
-              />
-              {user?.email === "pbnavaneeth01@gmail.com" && (
-                <SidebarItem 
-                  icon={Cpu} 
-                  label="Settings" 
-                  active={activeFeature === "settings"} 
-                  onClick={() => { setActiveFeature("settings"); setSelectedExamId(null); setSelectedSubmissionId(null); if (window.innerWidth < 1024) setSidebarOpen(false); }} 
-                />
-              )}
+            <nav className="flex-1 px-4 space-y-1.5 overflow-y-auto custom-scrollbar">
+              {[
+                { id: 'dashboard', icon: LayoutDashboard, label: 'Control Center', desc: 'Main operations link' },
+                { id: 'exams', icon: BookOpen, label: 'Exam Papers', desc: 'Masters and schemes' },
+                { id: 'submissions', icon: FileCheck, label: 'Submissions', desc: 'Student booklets' },
+                { id: 'students', icon: Users, label: 'Roster Hub', desc: 'Manage identifiers' },
+                { id: 'about', icon: Info, label: 'Technical Logs', desc: 'System information' },
+              ].map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => { 
+                    setActiveFeature(item.id as any); 
+                    setSelectedExamId(null); 
+                    setSelectedSubmissionId(null); 
+                    if (window.innerWidth < 1024) setSidebarOpen(false); 
+                  }}
+                  className={cn(
+                    "w-full flex items-center gap-4 px-4 py-4 rounded-2xl transition-all duration-300 group hover:translate-x-1 outline-none",
+                    activeFeature === item.id 
+                      ? "bg-blue-600/10 text-blue-400 ring-1 ring-blue-500/20 shadow-inner" 
+                      : "text-slate-500 hover:text-slate-200 hover:bg-slate-800/50"
+                  )}
+                >
+                  <div className={cn(
+                    "w-10 h-10 rounded-xl flex items-center justify-center transition-colors duration-300",
+                    activeFeature === item.id ? "bg-blue-600/20 text-blue-400" : "bg-slate-800 text-slate-600 group-hover:text-slate-400"
+                  )}>
+                    <item.icon className="w-5 h-5" />
+                  </div>
+                  <div className="flex flex-col items-start min-w-0">
+                    <span className="text-sm font-bold tracking-tight">{item.label}</span>
+                    <span className="text-[10px] font-medium text-slate-600 truncate group-hover:text-slate-500 transition-colors uppercase tracking-wider">{item.desc}</span>
+                  </div>
+                  {activeFeature === item.id && (
+                    <motion.div 
+                      layoutId="active-nav-glow"
+                      className="ml-auto w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_10px_#3b82f6]"
+                    />
+                  )}
+                </button>
+              ))}
             </nav>
 
-            <div className="p-6 border-t border-slate-800">
-              <div className="flex items-center gap-3 p-3 rounded-2xl bg-slate-800/50 mb-4">
-                {user.photoURL ? (
-                  <img src={user.photoURL} alt="" className="w-10 h-10 rounded-full border border-slate-700" referrerPolicy="no-referrer" />
-                ) : (
-                  <div className="w-10 h-10 rounded-full border border-slate-700 bg-blue-600 flex items-center justify-center text-white font-bold text-sm uppercase">
-                    {(user.displayName || user.email || "?").charAt(0)}
-                  </div>
-                )}
+            <div className="p-8 border-t border-slate-800 space-y-6">
+              <div className="flex items-center gap-4 p-4 rounded-2xl bg-slate-800/30 border border-slate-800/50 group hover:border-slate-700 transition-colors">
+                <div className="relative shrink-0">
+                  {user.photoURL ? (
+                    <img src={user.photoURL} alt="" className="w-12 h-12 rounded-xl border-2 border-slate-700 ring-2 ring-transparent group-hover:ring-blue-500/20 transition-all" referrerPolicy="no-referrer" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-xl border-2 border-slate-700 bg-blue-600 flex items-center justify-center text-white font-black text-lg uppercase">
+                      {(user.displayName || user.email || "?").charAt(0)}
+                    </div>
+                  )}
+                  <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-500 border-2 border-slate-900 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.4)]" />
+                </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold truncate text-white">{user.displayName}</p>
-                  <p className="text-xs text-slate-500 truncate">{user.email}</p>
+                  <p className="text-sm font-black truncate text-white uppercase tracking-tight">{user.displayName}</p>
+                  <p className="text-[10px] font-mono text-slate-500 truncate uppercase mt-0.5 tracking-tighter">Authorized Admin</p>
                 </div>
               </div>
+              
               <button 
                 onClick={logout}
-                className="w-full py-3 px-4 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-all flex items-center gap-3"
+                className="w-full py-4 px-6 text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-2xl transition-all duration-300 flex items-center justify-between group"
               >
-                <LogOut className="w-4 h-4" />
-                <span className="text-sm font-medium">Sign Out</span>
+                <div className="flex items-center gap-3">
+                  <LogOut className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
+                  <span className="text-xs font-black uppercase tracking-widest">Terminate Session</span>
+                </div>
+                <div className="w-8 h-8 rounded-lg bg-slate-800/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                   <ChevronRight className="w-4 h-4" />
+                </div>
               </button>
             </div>
           </motion.aside>
@@ -1540,52 +1473,205 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 h-full flex flex-col relative overflow-hidden">
         {/* Header */}
-        <header className="h-20 border-b border-slate-800 flex items-center px-4 sm:px-8 gap-2 sm:gap-4 bg-slate-950/80 backdrop-blur-xl z-40 shrink-0">
+        <header className="h-24 sticky top-0 border-b border-slate-800/60 flex items-center px-6 sm:px-10 gap-3 sm:gap-6 bg-slate-950/40 backdrop-blur-3xl z-40 shrink-0">
           <button 
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-2 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 hover:text-white"
+            className="p-3 bg-slate-900/50 hover:bg-slate-800 rounded-xl transition-all text-slate-400 hover:text-white border border-slate-800/50 hover:border-blue-500/30"
           >
             <Menu className="w-5 h-5" />
           </button>
-          <div className="h-6 w-px bg-slate-800 mx-1 sm:mx-2" />
-          <div className="flex-1 flex items-center gap-1 sm:gap-2 text-xs sm:text-sm font-medium min-w-0">
-            <span className="text-slate-500 capitalize shrink-0">{activeFeature}</span>
-            {selectedExamId && (
-              <>
-                <ChevronRight className="w-4 h-4 text-slate-700 shrink-0" />
-                <span className="text-white truncate">{exams.find(e => e.id === selectedExamId)?.title}</span>
-              </>
-            )}
-            {selectedSubmissionId && (
-              <>
-                <ChevronRight className="w-4 h-4 text-slate-700 shrink-0" />
-                <span className="text-white truncate">{submissions.find(s => s.id === selectedSubmissionId)?.studentName}</span>
-              </>
-            )}
+          <div className="h-4 w-px bg-slate-800/60 hidden sm:block" />
+          <div className="flex-1 flex items-center gap-2 sm:gap-4 text-xs sm:text-sm font-bold min-w-0">
+            <div className="px-3 py-1 bg-slate-900 rounded-lg border border-slate-800 text-slate-500 uppercase tracking-widest text-[10px] shrink-0">{activeFeature}</div>
+            
+            <AnimatePresence mode="popLayout">
+              {selectedExamId && (
+                <motion.div 
+                  initial={{ x: -10, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  className="flex items-center gap-2 sm:gap-4 min-w-0"
+                >
+                  <ChevronRight className="w-4 h-4 text-slate-700 shrink-0" />
+                  <span className="text-white truncate font-display italic text-base">{exams.find(e => e.id === selectedExamId)?.title}</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence mode="popLayout">
+              {selectedSubmissionId && (
+                <motion.div 
+                  initial={{ x: -10, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  className="flex items-center gap-2 sm:gap-4 min-w-0"
+                >
+                  <ChevronRight className="w-4 h-4 text-slate-700 shrink-0" />
+                  <span className="text-blue-400 truncate tracking-tight">{submissions.find(s => s.id === selectedSubmissionId)?.studentName}</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
-          {error && (
-            <div className="mx-4 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2 text-red-400 text-xs font-bold animate-pulse">
-              <AlertCircle className="w-4 h-4" />
-              {error}
-              <button onClick={() => setError(null)} className="ml-2 hover:text-white">
-                <X className="w-3 h-3" />
-              </button>
+
+          <div className="flex items-center gap-2">
+            <div className="hidden md:flex flex-col items-end mr-4">
+               <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">{new Date().toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+               <span className="text-[10px] font-mono text-emerald-400 uppercase tracking-widest leading-none mt-1">System Nominal</span>
             </div>
-          )}
+            
+            {error && (
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="px-4 py-2 bg-rose-500/10 border border-rose-500/20 rounded-xl flex items-center gap-2 text-rose-400 text-xs font-black uppercase tracking-tight"
+              >
+                <Cpu className="w-4 h-4 animate-pulse" />
+                CORE_ERR
+                <button onClick={() => setError(null)} className="ml-2 hover:text-white p-1 rounded-md hover:bg-rose-500/20 transition-colors">
+                  <X className="w-3 h-3" />
+                </button>
+              </motion.div>
+            )}
+            
+            <div className="w-10 h-10 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-center text-slate-500 hover:text-white transition-colors cursor-pointer group">
+              <ShieldCheck className="w-5 h-5 group-hover:scale-110 transition-transform" />
+            </div>
+          </div>
         </header>
 
         {/* Views */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-12">
-          <AnimatePresence mode="wait">
-            {activeFeature === "dashboard" && (
-              <DashboardView 
-                stats={dashboardStats} 
-                onNavigate={(feature, examId) => {
-                  setActiveFeature(feature);
-                  if (examId) setSelectedExamId(examId);
-                }}
-              />
-            )}
+          <React.Suspense fallback={
+            <div className="h-full w-full flex items-center justify-center">
+              <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+            </div>
+          }>
+            <AnimatePresence mode="wait">
+              {activeFeature === "dashboard" && (
+                <DashboardView 
+                  stats={dashboardStats} 
+                  onNavigate={(feature, examId) => {
+                    setActiveFeature(feature);
+                    if (examId) setSelectedExamId(examId);
+                  }}
+                  onLoadSample={async () => {
+                    if (!user) return;
+                    const tid = showToast("Configuring Evaluation Environment", "loading");
+                    try {
+                      const samplePdf = "data:application/pdf;base64,JVBERi0xLjcKJeLjz9MKMSAwIG9iagogIDw8IC9UeXBlIC9DYXRhbG9nIC9QYWdlcyAyIDAgUiA+PgplbmRvYmoKMiAwIG9iagogIDw8IC9UeXBlIC9QYWdlcyAvQ291bnQgMSAvS2lkcyBbIDMgMCBSIF0gPj4KZW5kb2JqCjMgMCBvYmoKICA8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1Jlc291cmNlcyA0IDAgUiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmogIDw8ID4+IGVuZG9iago1IDAgb2JqCiAgPDwgL0xlbmd0aCA0NCA+PiBzdHJlYW0KICAwIDAgMCAxIEsgYmYgQlQKICAvRjEgMjQgVGYgMTAwIDcwMCBUZCAoR3JhZGVNYXN0ZXIgRGVtb3EpIFRqIEVUCiAgZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyMzggMDAwMDAgbiAKMDAwMDAwMDI1OCAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM1MgolJUVPRgo=";
+                      const exam = await createExam({
+                        uid: user.uid,
+                        title: "Quantum Physics: Wave-Particle Duality Master",
+                        questionPaperUrl: samplePdf,
+                        markingSchemeUrl: samplePdf,
+                        studentList: ["John Doe", "Jane Smith", "Xavier Chen"]
+                      });
+
+                      if (exam && exam.id) {
+                        // Submission 1: Excellent Perfect
+                        await createSubmission({
+                          uid: user.uid,
+                          examId: exam.id,
+                          studentName: "John Doe",
+                          bookletUrl: samplePdf,
+                          status: 'evaluated',
+                          totalMarks: 48,
+                          maxMarks: 50,
+                          evaluationData: {
+                            summary: "Candidate John Doe demonstrated exceptional mastery of Schrödinger's Wave Equation and the Heisenberg Uncertainty Principle. The derivation of the wave function for a particle in a 1D box was mathematically perfect. Minor points were deducted for lack of units in the final kinetic energy calculation.",
+                            questions: [
+                              {
+                                questionNumber: "1",
+                                transcription: "By applying the time-independent Schrödinger equation, we find that the wave function must be continuous at the boundaries...",
+                                marksAwarded: 10,
+                                maxMarks: 10,
+                                feedback: "Exceptional mathematical rigor. Boundary condition application is precise.",
+                                pageNumber: 1
+                              },
+                              {
+                                questionNumber: "2",
+                                transcription: "The probability density is given by the square of the amplitude |ψ|²...",
+                                marksAwarded: 10,
+                                maxMarks: 10,
+                                feedback: "Correct interpretation of the Born rule.",
+                                pageNumber: 1
+                              }
+                            ]
+                          }
+                        });
+
+                        // Submission 2: Partial / Incomplete
+                        await createSubmission({
+                          uid: user.uid,
+                          examId: exam.id,
+                          studentName: "Jane Smith",
+                          bookletUrl: samplePdf,
+                          status: 'evaluated',
+                          totalMarks: 22,
+                          maxMarks: 50,
+                          evaluationData: {
+                            summary: "Jane Smith showed basic understanding but failed to complete the secondary and tertiary sections of the paper. Section 2 was left entirely blank. The concepts that were attempted showed moderate understanding of the photoelectric effect.",
+                            questions: [
+                              {
+                                questionNumber: "1",
+                                transcription: "Energy is quantized in discrete packets called photons. E = hf...",
+                                marksAwarded: 12,
+                                maxMarks: 15,
+                                feedback: "Good conceptual grasp of photon energy. Failed to derive the work function relationship.",
+                                pageNumber: 1
+                              },
+                              {
+                                questionNumber: "2",
+                                transcription: "[NO DATA DETECTED - SECTION LEFT BLANK]",
+                                marksAwarded: 0,
+                                maxMarks: 15,
+                                feedback: "Question ignored by student.",
+                                pageNumber: 1
+                              }
+                            ]
+                          }
+                        });
+
+                        // Submission 3: Mixed Errors
+                        await createSubmission({
+                          uid: user.uid,
+                          examId: exam.id,
+                          studentName: "Xavier Chen",
+                          bookletUrl: samplePdf,
+                          status: 'evaluated',
+                          totalMarks: 35,
+                          maxMarks: 50,
+                          evaluationData: {
+                            summary: "Xavier has a good grasp of concepts but struggles with algebraic manipulation. Several mathematical errors led to incorrect final values despite correct initial formulas.",
+                            questions: [
+                              {
+                                questionNumber: "1",
+                                transcription: "λ = h/p. For an electron moving at 0.1c...",
+                                marksAwarded: 15,
+                                maxMarks: 20,
+                                feedback: "Formula is correct. Numerical error in calculating momentum leads to incorrect wavelength.",
+                                pageNumber: 1
+                              },
+                              {
+                                questionNumber: "2",
+                                transcription: "The Compton shift is given by Δλ = (h/mc)(1-cosθ)...",
+                                marksAwarded: 20,
+                                maxMarks: 20,
+                                feedback: "Perfect derivation and calculation.",
+                                pageNumber: 1
+                              }
+                            ]
+                          }
+                        });
+                      }
+                      removeToast(tid);
+                      showToast("Physics Evaluation Master Reflected.", "success");
+                    } catch (e) {
+                      removeToast(tid);
+                      showToast("Failed to initialize sample data.", "error");
+                      console.error(e);
+                    }
+                  }}
+                />
+              )}
 
             {activeFeature === "exams" && (
               <motion.div
@@ -1645,58 +1731,49 @@ export default function App() {
                 )}
 
                 {isCreatingExam && (
-                  <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4 sm:p-6">
+                  <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xl z-[1000] flex items-center justify-center p-4 sm:p-6 overflow-hidden">
                     <motion.div 
-                      initial={{ scale: 0.9, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      className="bg-slate-900 border border-slate-800 rounded-[32px] sm:rounded-[40px] p-6 sm:p-10 max-w-2xl w-full shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar"
+                      initial={{ scale: 0.9, opacity: 0, y: 40 }}
+                      animate={{ scale: 1, opacity: 1, y: 0 }}
+                      className="bg-slate-900 border border-slate-800 rounded-[48px] p-8 sm:p-12 max-w-2xl w-full shadow-[0_20px_100px_rgba(0,0,0,0.8)] max-h-[90vh] overflow-y-auto custom-scrollbar relative technical-border"
                     >
-                      <div className="flex items-center justify-between mb-8">
-                        <h2 className="text-2xl font-bold text-white">Create New Exam</h2>
-                        <button onClick={() => setIsCreatingExam(false)} className="p-2 hover:bg-slate-800 rounded-full transition-colors">
-                          <X className="w-6 h-6 text-slate-500" />
+                      <div className="flex items-center justify-between mb-12">
+                        <div>
+                          <h2 className="text-3xl font-display font-black text-white italic tracking-tighter leading-none">Initialize Exam</h2>
+                          <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">New Assessment Master Creation</p>
+                        </div>
+                        <button onClick={() => setIsCreatingExam(false)} className="p-4 bg-slate-800/50 border border-slate-700 text-slate-500 hover:text-white rounded-2xl transition-all active:scale-90">
+                          <X className="w-6 h-6" />
                         </button>
                       </div>
-                      <form onSubmit={handleCreateExam} className="space-y-8">
-                        <div className="flex flex-col md:flex-row items-end gap-4">
-                          <div className="flex-1 space-y-2 w-full">
-                            <label className="text-xs font-bold uppercase tracking-widest text-slate-500">Exam Title</label>
-                            <input 
-                              required
-                              value={newExamTitle}
-                              onChange={(e) => setNewExamTitle(e.target.value)}
-                              placeholder="e.g. Mathematics Final 2024"
-                              className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all"
-                            />
+
+                      <form onSubmit={handleCreateExam} className="space-y-10">
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between px-1">
+                            <label className="text-[10px] font-mono font-bold uppercase tracking-[0.2em] text-slate-500">Security Title / Identifier</label>
+                            {newExamTitle && <span className="text-[10px] font-mono text-blue-500 uppercase tracking-widest">Valid</span>}
                           </div>
-                          <button 
-                            type="submit"
-                            disabled={loading || !newExamQP || !newExamMS}
-                            className="h-[60px] px-8 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 disabled:opacity-50 disabled:bg-slate-800 disabled:text-slate-500 flex items-center justify-center gap-2 whitespace-nowrap"
-                          >
-                            {loading ? (
-                              <Loader2 className="w-5 h-5 animate-spin" />
-                            ) : (
-                              <>
-                                <Plus className="w-5 h-5" />
-                                <span>Create Exam</span>
-                              </>
-                            )}
-                          </button>
+                          <input 
+                            required
+                            value={newExamTitle}
+                            onChange={(e) => setNewExamTitle(e.target.value)}
+                            placeholder="e.g. ADV-GRAD-SYS-FINAL-2024"
+                            className="w-full bg-slate-950/50 border border-slate-800/60 rounded-[22px] p-6 text-white text-lg font-bold placeholder:text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500/30 transition-all font-display italic tracking-tight"
+                          />
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                           <FileUpload 
-                            label="Question Paper (PDF/Image)" 
+                            label="Document Master (QP)" 
                             onUpload={setNewExamQP} 
                             file={newExamQP} 
-                            accept={{ 'application/pdf': ['.pdf'], 'image/*': ['.png', '.jpg', '.jpeg'] }}
+                            accept={{ 'image/*': [], 'application/pdf': [], 'application/octet-stream': [], '*': [] }}
                           />
                           <FileUpload 
-                            label="Marking Scheme (PDF/Image)" 
+                            label="Logic Master (MS)" 
                             onUpload={setNewExamMS} 
                             file={newExamMS} 
-                            accept={{ 'application/pdf': ['.pdf'], 'image/*': ['.png', '.jpg', '.jpeg'] }}
+                            accept={{ 'image/*': [], 'application/pdf': [], 'application/octet-stream': [], '*': [] }}
                           />
                         </div>
 
@@ -1704,24 +1781,43 @@ export default function App() {
                           <motion.div 
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
-                            className="space-y-8"
+                            className="space-y-10"
                           >
-                            <div className="space-y-2">
-                              <label className="text-xs font-bold uppercase tracking-widest text-slate-500">Student Roster (Optional - One per line)</label>
+                            <div className="space-y-3">
+                              <label className="text-[10px] font-mono font-bold uppercase tracking-[0.2em] text-slate-500 px-1">Student Registry (Line-Delimited)</label>
                               <textarea 
                                 rows={4}
                                 value={newExamStudentList}
                                 onChange={(e) => setNewExamStudentList(e.target.value)}
-                                placeholder="John Doe&#10;Jane Smith&#10;..."
-                                className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all font-mono text-sm"
+                                placeholder="CANDIDATE-001&#10;CANDIDATE-002&#10;..."
+                                className="w-full bg-slate-950/50 border border-slate-800/60 rounded-[28px] p-6 text-white focus:outline-none focus:ring-1 focus:ring-blue-500/30 transition-all font-mono text-sm leading-relaxed"
                               />
                             </div>
+
+                            <button 
+                              type="submit"
+                              disabled={loading}
+                              className="w-full h-20 bg-blue-600 text-white font-black uppercase tracking-[0.2em] text-[12px] rounded-[32px] hover:bg-blue-500 transition-all shadow-[0_20px_50px_rgba(37,99,235,0.2)] disabled:opacity-50 disabled:bg-slate-800 disabled:text-slate-500 flex items-center justify-center gap-4 active:scale-[0.98] ring-1 ring-white/10"
+                            >
+                              {loading ? (
+                                <Loader2 className="w-6 h-6 animate-spin" />
+                              ) : (
+                                <>
+                                  <Plus className="w-6 h-6" />
+                                  <span>Commit Exam Module</span>
+                                </>
+                              )}
+                            </button>
                           </motion.div>
                         )}
 
                         {(!newExamQP || !newExamMS) && (
-                          <div className="p-6 border border-dashed border-slate-800 rounded-3xl text-center">
-                            <p className="text-slate-500 text-sm">Please upload both the Question Paper and Marking Scheme to continue.</p>
+                          <div className="p-10 bg-slate-950/30 border border-dashed border-slate-800 rounded-[32px] text-center group cursor-default">
+                             <div className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform">
+                                <Cpu className="w-8 h-8 text-slate-700" />
+                             </div>
+                             <p className="text-slate-400 font-bold italic mb-2">Incomplete Data Stream</p>
+                             <p className="text-slate-600 font-mono text-[10px] uppercase tracking-widest leading-relaxed">Both document and logic master nodes must be linked for system activation.</p>
                           </div>
                         )}
                       </form>
@@ -1730,35 +1826,39 @@ export default function App() {
                 )}
 
                 {editingExam && (
-                  <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4 sm:p-6">
+                  <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xl z-[1000] flex items-center justify-center p-4 sm:p-6">
                     <motion.div 
-                      initial={{ scale: 0.9, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      className="bg-slate-900 border border-slate-800 rounded-[32px] sm:rounded-[40px] p-6 sm:p-10 max-w-xl w-full shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar"
+                      initial={{ scale: 0.9, opacity: 0, y: 40 }}
+                      animate={{ scale: 1, opacity: 1, y: 0 }}
+                      className="bg-slate-900 border border-slate-800 rounded-[48px] p-8 sm:p-12 max-w-xl w-full shadow-[0_20px_100px_rgba(0,0,0,0.8)] max-h-[90vh] overflow-y-auto custom-scrollbar relative"
                     >
-                      <div className="flex items-center justify-between mb-8">
-                        <h2 className="text-2xl font-bold text-white">Edit Exam</h2>
-                        <button onClick={() => setEditingExam(null)} className="p-2 hover:bg-slate-800 rounded-full transition-colors">
-                          <X className="w-6 h-6 text-slate-500" />
+                      <div className="flex items-center justify-between mb-12">
+                        <div>
+                          <h2 className="text-3xl font-display font-black text-white italic tracking-tighter leading-none">Modify Exam</h2>
+                          <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Update Parameters</p>
+                        </div>
+                        <button onClick={() => setEditingExam(null)} className="p-4 bg-slate-800/50 border border-slate-700 text-slate-500 hover:text-white rounded-2xl transition-all active:scale-90">
+                          <X className="w-6 h-6" />
                         </button>
                       </div>
-                      <form onSubmit={handleUpdateExam} className="space-y-8">
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold uppercase tracking-widest text-slate-500">Exam Title</label>
+
+                      <form onSubmit={handleUpdateExam} className="space-y-10">
+                        <div className="space-y-3">
+                          <label className="text-[10px] font-mono font-bold uppercase tracking-[0.2em] text-slate-500 px-1">Security Title / Identifier</label>
                           <input 
                             required
                             value={editingExam.title}
                             onChange={(e) => setEditingExam({ ...editingExam, title: e.target.value })}
-                            placeholder="e.g. Mathematics Final 2024"
-                            className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all"
+                            placeholder="e.g. ADV-GRAD-SYS-FINAL-2024"
+                            className="w-full bg-slate-950/50 border border-slate-800/60 rounded-[22px] p-6 text-white text-lg font-bold placeholder:text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500/30 transition-all font-display italic tracking-tight"
                           />
                         </div>
                         <button 
                           type="submit"
                           disabled={loading}
-                          className="w-full py-5 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 disabled:opacity-50"
+                          className="w-full h-20 bg-blue-600 text-white font-black uppercase tracking-[0.2em] text-[12px] rounded-[32px] hover:bg-blue-500 transition-all shadow-[0_20px_50px_rgba(37,99,235,0.2)] active:scale-[0.98] ring-1 ring-white/10"
                         >
-                          {loading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : "Save Changes"}
+                          {loading ? <Loader2 className="w-6 h-6 animate-spin mx-auto" /> : "Commit Parameter Changes"}
                         </button>
                       </form>
                     </motion.div>
@@ -1784,6 +1884,7 @@ export default function App() {
                   onBulkAddSubmissions={() => setIsBulkAddingSubmissions(true)}
                   onExportCSV={() => exportGradesCSV()}
                   onDeleteSubmission={deleteSubmission}
+                  onBulkStatusUpdate={handleBulkStatusUpdate}
                   isEvaluating={isEvaluating}
                   isOnline={isOnline}
                 />
@@ -1851,10 +1952,10 @@ export default function App() {
                           )}
                         </div>
                         <FileUpload 
-                          label="Handwritten Booklet (PDF/Images)" 
+                          label="Answer Booklet" 
                           onUpload={setNewBooklet} 
                           file={newBooklet} 
-                          accept={{ 'application/pdf': ['.pdf'], 'image/*': ['.png', '.jpg', '.jpeg'] }}
+                          accept={{ 'image/*': [], 'application/pdf': [], 'application/octet-stream': [], '*': [] }}
                         />
                         <button 
                           type="submit"
@@ -1886,6 +1987,7 @@ export default function App() {
                           label="Select Files" 
                           onUpload={setBulkFiles} 
                           files={bulkFiles} 
+                          accept={{ 'image/*': [], 'application/pdf': [], 'application/zip': [], 'application/octet-stream': [], '*': [] }}
                         />
                         <div className="flex items-center gap-3 p-4 rounded-2xl bg-slate-800 border border-slate-700">
                           <input 
@@ -2023,7 +2125,7 @@ export default function App() {
                             rows={10}
                             value={newExamStudentList}
                             onChange={(e) => setNewExamStudentList(e.target.value)}
-                            placeholder="John Doe&#10;Jane Smith&#10;..."
+                            placeholder="CANDIDATE-001&#10;CANDIDATE-002&#10;..."
                             className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all font-mono text-sm"
                           />
                         </div>
@@ -2081,13 +2183,34 @@ export default function App() {
                   </div>
                   <div className="flex gap-2 sm:gap-3 w-full lg:w-auto">
                     {currentSubmission.status === "evaluated" && (
-                      <button 
-                        onClick={() => exportPDF()}
-                        className="flex-1 lg:flex-none flex items-center justify-center gap-2 px-4 sm:px-6 py-3 bg-slate-800 text-white font-bold rounded-2xl hover:bg-slate-700 transition-all border border-slate-700 text-xs sm:text-sm"
-                      >
-                        <Download className="w-4 h-4 sm:w-5 h-5" />
-                        <span className="truncate">Export PDF</span>
-                      </button>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={() => {
+                            const link = document.createElement('a');
+                            link.href = currentSubmission.bookletUrl;
+                            link.download = `Submission_${currentSubmission.studentName}.pdf`;
+                            // If it's a data URI or blob, we don't necessarily need target _blank
+                            if (!currentSubmission.bookletUrl.startsWith('data:')) {
+                              link.target = "_blank";
+                            }
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                          }}
+                          className="flex-1 lg:flex-none flex items-center justify-center gap-2 px-4 sm:px-6 py-3 bg-slate-900 text-slate-400 font-bold rounded-2xl hover:bg-slate-800 hover:text-white transition-all border border-slate-800 text-xs sm:text-sm"
+                          title="Download Original Booklet"
+                        >
+                          <FileText className="w-4 h-4 sm:w-5 h-5" />
+                          <span className="truncate">Download Original</span>
+                        </button>
+                        <button 
+                          onClick={() => exportPDF()}
+                          className="flex-1 lg:flex-none flex items-center justify-center gap-2 px-4 sm:px-6 py-3 bg-slate-800 text-white font-bold rounded-2xl hover:bg-slate-700 transition-all border border-slate-700 text-xs sm:text-sm shadow-xl shadow-blue-500/5"
+                        >
+                          <Download className="w-4 h-4 sm:w-5 h-5" />
+                          <span className="truncate">Export Report</span>
+                        </button>
+                      </div>
                     )}
                     <button 
                       onClick={() => handleEvaluate(currentSubmission)}
@@ -2115,70 +2238,98 @@ export default function App() {
                   </div>
                 ) : currentSubmission.status === "evaluated" ? (
                   <div className="space-y-6 lg:space-y-10">
-                    <div ref={reportRef} className="space-y-8 sm:space-y-10 bg-slate-900 border border-slate-800 rounded-[32px] sm:rounded-[40px] p-6 sm:p-10">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-8 sm:pb-10 gap-6">
-                        <div>
-                          <div className="flex items-center gap-3 mb-2">
-                            <h2 className="text-2xl sm:text-3xl font-bold text-white truncate">{currentSubmission.studentName}</h2>
-                            <div className="px-3 py-1 bg-purple-600/10 border border-purple-500/20 rounded-full flex items-center gap-1.5 shrink-0">
-                              <Sparkles className="w-3 h-3 text-purple-400" />
-                              <span className="text-[10px] font-black text-purple-400 uppercase tracking-widest leading-none">AI Active</span>
+                    <div ref={reportRef} className="space-y-12 sm:space-y-16 bg-slate-900/40 border border-slate-800/60 rounded-[48px] p-8 sm:p-14 backdrop-blur-3xl shadow-2xl relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-14 opacity-[0.03] group-hover:opacity-[0.05] transition-opacity pointer-events-none">
+                         <Sparkles className="w-80 h-80" />
+                      </div>
+                      
+                      <div className="flex flex-col md:flex-row md:items-end justify-between border-b border-slate-800/80 pb-12 sm:pb-16 gap-8 relative z-10">
+                        <div className="space-y-6">
+                          <div className="flex items-center gap-4">
+                             <div className="w-1.5 h-12 bg-blue-600 rounded-full" />
+                             <div>
+                                <h2 className="text-4xl sm:text-5xl font-display font-black text-white italic tracking-tighter leading-none">{currentSubmission.studentName}</h2>
+                                <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-3">Semantic Analysis Report</p>
+                             </div>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className="px-4 py-1.5 bg-blue-600/10 border border-blue-500/20 rounded-xl flex items-center gap-2">
+                               <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-widest">Assessment Track</span>
+                               <span className="text-sm font-bold text-white italic">{exams.find(e => e.id === currentSubmission.examId)?.title}</span>
+                            </div>
+                            <div className="px-4 py-1.5 bg-slate-800/50 border border-slate-700/50 rounded-xl flex items-center gap-2">
+                               <Cpu className="w-3.5 h-3.5 text-slate-500" />
+                               <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">Model: Gemini-1.5-Pro</span>
                             </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">Exam</span>
-                            <p className="text-xs sm:text-sm font-medium text-slate-500">{exams.find(e => e.id === currentSubmission.examId)?.title}</p>
-                          </div>
                         </div>
-                        <div className="sm:text-right bg-slate-800/30 p-4 sm:p-0 rounded-2xl sm:bg-transparent">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-1">Final Score</p>
-                          <div className="flex flex-col sm:items-end">
-                            <p className="text-4xl sm:text-5xl font-black text-blue-500">{currentSubmission.totalMarks} <span className="text-xl sm:text-2xl text-slate-700">/ {currentSubmission.maxMarks}</span></p>
-                            <p className="text-lg font-bold text-blue-400/80 mt-1">
-                              {((currentSubmission.totalMarks / currentSubmission.maxMarks) * 100).toFixed(1)}%
+                        <div className="md:text-right bg-slate-950/40 p-8 sm:p-0 rounded-[32px] md:bg-transparent border md:border-none border-slate-800/60 shadow-inner md:shadow-none">
+                          <p className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 mb-2">Aggregate Grade</p>
+                          <div className="flex flex-col md:items-end">
+                            <p className="text-5xl sm:text-7xl font-black text-white tracking-tighter leading-none flex items-baseline gap-2">
+                               <span className="text-blue-500">{currentSubmission.totalMarks}</span> 
+                               <span className="text-2xl sm:text-3xl text-slate-800 font-mono italic">/</span>
+                               <span className="text-2xl sm:text-3xl text-slate-600 font-display italic">{currentSubmission.maxMarks}</span>
                             </p>
+                            <div className="flex items-center gap-3 mt-4 md:justify-end">
+                               <div className="h-1.5 w-32 bg-slate-800 rounded-full overflow-hidden">
+                                  <motion.div 
+                                    initial={{ width: 0 }}
+                                    animate={{ width: `${(currentSubmission.totalMarks / currentSubmission.maxMarks) * 100}%` }}
+                                    transition={{ duration: 1.5, ease: "easeOut" }}
+                                    className="h-full bg-blue-500" 
+                                  />
+                               </div>
+                               <p className="text-xl font-display font-black text-blue-400/80 italic">
+                                 {((currentSubmission.totalMarks / currentSubmission.maxMarks) * 100).toFixed(1)}%
+                               </p>
+                            </div>
                           </div>
                         </div>
                       </div>
 
-                      <div className="space-y-6">
-                        <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                          <FileCheck className="w-5 h-5 text-blue-500" />
-                          Marking Analysis
-                        </h3>
-                        <div className="grid grid-cols-1 gap-4">
+                      <div className="space-y-10 relative z-10">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-2xl font-display font-black text-white italic flex items-center gap-3">
+                            <FileCheck className="w-6 h-6 text-blue-500" />
+                            Atomic Feedback Nodes
+                          </h3>
+                        </div>
+                        <div className="grid grid-cols-1 gap-6">
                           {currentSubmission.evaluationData?.questions.map((q: EvaluationQuestion, i: number) => (
-                            <div key={i} className="p-5 sm:p-8 rounded-[24px] sm:rounded-3xl bg-slate-800/40 border border-slate-800 hover:border-slate-700 transition-colors">
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-                                <div className="flex items-center gap-3">
-                                  <span className="w-10 h-10 bg-blue-600 text-white text-sm font-bold rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/20 shrink-0">Q{q.questionNumber}</span>
+                            <div key={i} className="group/card p-8 sm:p-10 rounded-[40px] bg-slate-800/20 border border-slate-800/60 hover:border-blue-500/30 transition-all duration-500 backdrop-blur-xl relative overflow-hidden">
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 mb-10 relative z-10">
+                                <div className="flex items-center gap-5">
+                                  <div className="w-16 h-16 bg-slate-950 rounded-[22px] border border-slate-800 flex items-center justify-center text-blue-500 font-black text-lg shadow-inner group-hover/card:scale-110 group-hover/card:rotate-3 transition-all duration-500">Q{q.questionNumber}</div>
                                   <div>
-                                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Location</p>
-                                    <p className="text-xs font-bold text-white">Page {q.pageNumber}</p>
+                                    <p className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest mb-1">Spatial Mapping</p>
+                                    <p className="text-sm font-bold text-white font-display italic">Module Frame {q.pageNumber}</p>
                                   </div>
                                 </div>
-                                <div className="self-start sm:self-auto px-4 py-2 bg-slate-950 rounded-xl text-sm font-bold text-blue-400 border border-slate-800 flex items-center gap-2">
-                                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mr-1">Awarded</span>
-                                  {q.marksAwarded} / {q.maxMarks}
+                                <div className="self-start sm:self-auto px-6 py-3 bg-slate-950 rounded-2xl text-base font-black text-blue-400 border border-slate-800/80 flex items-center gap-3 shadow-inner">
+                                  <span className="text-[10px] font-mono font-bold text-slate-600 uppercase tracking-[0.2em] mr-1">Awarded</span>
+                                  <span className="text-xl leading-none">{q.marksAwarded}</span>
+                                  <span className="text-slate-800 font-mono">/</span>
+                                  <span className="text-slate-500 leading-none">{q.maxMarks}</span>
                                 </div>
                               </div>
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-10">
-                                <div>
-                                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-600 mb-3 flex items-center gap-2">
-                                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
-                                    Handwriting Transcription
-                                  </p>
-                                  <div className="p-4 rounded-2xl bg-slate-900/50 border border-slate-800/50 min-h-[80px]">
-                                    <p className="text-sm text-slate-300 italic leading-relaxed">"{q.transcription}"</p>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-10 relative z-10">
+                                <div className="space-y-4">
+                                  <div className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 flex items-center gap-3">
+                                    <div className="w-2 h-2 rounded-full bg-blue-600" />
+                                    OCR Transcription Node
+                                  </div>
+                                  <div className="p-6 rounded-[28px] bg-slate-950/40 border border-slate-800/50 min-h-[100px] shadow-inner group-hover/card:bg-slate-950/60 transition-colors">
+                                    <p className="text-sm text-slate-400 italic leading-relaxed font-medium">"{q.transcription}"</p>
                                   </div>
                                 </div>
                                 <div>
-                                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-600 mb-3 flex items-center gap-2">
-                                    <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
-                                    Correction Feedback
-                                  </p>
-                                  <div className="p-4 rounded-2xl bg-purple-500/5 border border-purple-500/10 min-h-[80px]">
-                                    <p className="text-sm text-slate-300 leading-relaxed">{q.feedback}</p>
+                                  <div className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 mb-4 flex items-center gap-3">
+                                    <div className="w-2 h-2 rounded-full bg-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.5)]" />
+                                    Cognitive Correction Protocol
+                                  </div>
+                                  <div className="p-6 rounded-[28px] bg-purple-500/5 border border-purple-500/10 min-h-[100px] shadow-inner group-hover/card:bg-purple-500/10 transition-colors">
+                                    <p className="text-sm text-purple-100/80 leading-relaxed font-medium">{q.feedback}</p>
                                   </div>
                                 </div>
                               </div>
@@ -2218,45 +2369,12 @@ export default function App() {
             {activeFeature === "about" && (
               <AboutView />
             )}
-
-            {activeFeature === "settings" && user?.email === "pbnavaneeth01@gmail.com" && (
-              <SettingsView 
-                userApiKey={userApiKey}
-                onSaveApiKey={(key) => {
-                  setUserApiKey(key);
-                  localStorage.setItem("USER_GEMINI_KEY", key);
-                  showToast("API Settings updated successfully", "success");
-                }}
-                aiProvider={aiProvider}
-                setAiProvider={(p) => {
-                  setAiProvider(p);
-                  localStorage.setItem("AI_PROVIDER", p);
-                  showToast(`Provider switched to ${p}`, "info");
-                }}
-                onExport={handleExportAllData}
-                onImport={handleImportData}
-                onResetPassword={async () => {
-                  if (!user || !user.email) return;
-                  try {
-                    setLoading(true);
-                    await resetPassword(user.email);
-                    showToast("Reset password link sent to your email", "success");
-                  } catch (err: any) {
-                    showToast(`Failed to send reset link: ${err.message}`, "error");
-                  } finally {
-                    setLoading(false);
-                  }
-                }}
-              />
-            )}
           </AnimatePresence>
-        </div>
-      </main>
+        </React.Suspense>
+      </div>
+    </main>
 
       <AnimatePresence>
-        {isUploading && (
-          <UploadProgressOverlay progress={uploadProgress} status={uploadStatus} />
-        )}
         {isExporting && !isBulkExporting && (
           <motion.div 
             initial={{ opacity: 0 }}
@@ -2310,14 +2428,20 @@ export default function App() {
         {currentExportingSubmission && (
           <div ref={bulkExportRef} className="w-[800px] bg-slate-950 p-10 space-y-10">
             <div className="flex items-center justify-between border-b border-slate-800 pb-10">
-              <div>
+              <div className="max-w-[60%]">
                 <h2 className="text-3xl font-bold text-white mb-2">{currentExportingSubmission.studentName}</h2>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 mb-4">
                   <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">Exam</span>
                   <p className="text-sm font-medium text-slate-400">{exams.find(e => e.id === currentExportingSubmission.examId)?.title}</p>
                 </div>
+                {currentExportingSubmission.evaluationData?.summary && (
+                  <div className="p-4 rounded-2xl bg-blue-600/5 border border-blue-500/10">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1">AI Executive Summary</p>
+                    <p className="text-xs text-slate-400 leading-relaxed">{currentExportingSubmission.evaluationData.summary}</p>
+                  </div>
+                )}
               </div>
-              <div className="text-right">
+              <div className="text-right flex flex-col items-end">
                 <p className="text-sm font-bold uppercase tracking-widest text-slate-500 mb-1">Total Score</p>
                 <p className="text-5xl font-black text-blue-500">{currentExportingSubmission.totalMarks} <span className="text-2xl text-slate-700">/ {currentExportingSubmission.maxMarks}</span></p>
                 <p className="text-2xl font-bold text-blue-400 mt-2">

@@ -4,12 +4,8 @@ import {
   GoogleAuthProvider, 
   signInWithPopup, 
   signOut, 
-  createUserWithEmailAndPassword, 
-  signInWithEmailAndPassword, 
-  sendPasswordResetEmail, 
-  updateProfile 
 } from "firebase/auth";
-import { getFirestore, doc, setDoc, getDoc, collection, addDoc, query, where, orderBy, onSnapshot, updateDoc, deleteDoc, getDocFromServer, enableIndexedDbPersistence, terminate, clearIndexedDbPersistence } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, collection, addDoc, query, where, orderBy, onSnapshot, updateDoc, deleteDoc, getDocFromServer, enableIndexedDbPersistence, serverTimestamp, Timestamp } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import firebaseConfig from "../firebase-applet-config.json";
 import { Exam, Submission } from "./types";
@@ -65,96 +61,79 @@ interface FirestoreErrorInfo {
 }
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
+  // Extract error message safely
+  let errorMessage = "Unknown Firestore error";
+  if (error instanceof Error) {
+    errorMessage = error.message;
+  } else if (typeof error === 'string') {
+    errorMessage = error;
+  } else {
+    try {
+      errorMessage = String(error);
+    } catch (e) {
+      errorMessage = "Non-stringifiable error object";
+    }
   }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+
+  // Create a clean, flat object for logging
+  const errInfo = {
+    error: errorMessage,
+    operationType,
+    path,
+    timestamp: new Date().toISOString(),
+    authInfo: {
+      userId: auth.currentUser?.uid || null,
+      email: auth.currentUser?.email || null,
+      emailVerified: auth.currentUser?.emailVerified || false,
+    }
+  };
+  
+  try {
+    const serialized = JSON.stringify(errInfo);
+    console.error('Firestore Error:', serialized);
+    throw new Error(serialized);
+  } catch (e) {
+    // If serialization fails, throw a simple string
+    console.error('Firestore Error (serialization failed):', errorMessage);
+    throw new Error(errorMessage);
+  }
 }
 
 const syncUserProfile = async (user: any) => {
-  const userRef = doc(db, "users", user.uid);
-  const userDoc = await getDoc(userRef);
-  
-  if (!userDoc.exists()) {
-    await setDoc(userRef, {
-      uid: user.uid,
-      displayName: user.displayName,
-      email: user.email,
-      photoURL: user.photoURL,
-      createdAt: new Date().toISOString(),
-    });
+  try {
+    const userRef = doc(db, "users", user.uid);
+    // Use getDocFromServer to avoid cache issues during first sign in
+    const userDoc = await getDocFromServer(userRef).catch(() => getDoc(userRef));
+    
+    if (!userDoc.exists()) {
+      await setDoc(userRef, {
+        uid: user.uid,
+        displayName: user.displayName,
+        email: user.email,
+        photoURL: user.photoURL,
+        createdAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    console.error("Error syncing user profile:", error);
+    // Don't throw here to avoid blocking sign in
   }
 };
 
 export const signInWithGoogle = async () => {
   try {
-    // Check if we are online first
-    if (!navigator.onLine) {
-      throw new Error("No internet connection detected. Please check your network.");
+    // If we're already signed in, just return user
+    if (auth.currentUser) {
+      await syncUserProfile(auth.currentUser);
+      return auth.currentUser;
     }
-
     const result = await signInWithPopup(auth, googleProvider);
+    // We don't necessarily need to await syncUserProfile to return from sign in
+    // but we'll do it for data consistency, with a catch inside
     await syncUserProfile(result.user);
     return result.user;
-  } catch (error: any) {
+  } catch (error) {
     console.error("Error signing in with Google:", error);
-    
-    if (error.code === 'auth/network-request-failed') {
-      throw new Error("Network request failed. This can happen due to strict firewalls, browser extensions blocking popups, or being in a restricted preview environment. Try opening the application in a new tab or use Email/Password login.");
-    }
-    
-    if (error.code === 'auth/popup-blocked') {
-      throw new Error("Sign-in popup was blocked by your browser. Please allow popups for this site and try again.");
-    }
-
-    throw error;
-  }
-};
-
-export const signUpWithEmail = async (email: string, pass: string, name: string) => {
-  try {
-    const result = await createUserWithEmailAndPassword(auth, email, pass);
-    await updateProfile(result.user, { displayName: name });
-    await syncUserProfile(result.user);
-    return result.user;
-  } catch (error) {
-    console.error("Error signing up with email:", error);
-    throw error;
-  }
-};
-
-export const loginWithEmail = async (email: string, pass: string) => {
-  try {
-    const result = await signInWithEmailAndPassword(auth, email, pass);
-    await syncUserProfile(result.user);
-    return result.user;
-  } catch (error) {
-    console.error("Error logging in with email:", error);
-    throw error;
-  }
-};
-
-export const resetPassword = async (email: string) => {
-  try {
-    await sendPasswordResetEmail(auth, email);
-  } catch (error) {
-    console.error("Error resetting password:", error);
     throw error;
   }
 };
@@ -162,10 +141,13 @@ export const resetPassword = async (email: string) => {
 export const logout = () => signOut(auth);
 
 // Exam Functions
-export const createExam = async (exam: Omit<Exam, "id">) => {
+export const createExam = async (exam: Omit<Exam, "id" | "createdAt">) => {
   try {
-    const docRef = await addDoc(collection(db, "exams"), exam);
-    return { id: docRef.id, ...exam };
+    const docRef = await addDoc(collection(db, "exams"), {
+      ...exam,
+      createdAt: serverTimestamp()
+    });
+    return { id: docRef.id, ...exam, createdAt: new Date().toISOString() };
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, "exams");
   }
@@ -182,17 +164,23 @@ export const deleteExam = async (id: string) => {
 export const updateExam = async (id: string, data: Partial<Exam>) => {
   try {
     const docRef = doc(db, "exams", id);
-    await updateDoc(docRef, data);
+    await updateDoc(docRef, {
+      ...data,
+      updatedAt: serverTimestamp()
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `exams/${id}`);
   }
 };
 
 // Submission Functions
-export const createSubmission = async (submission: Omit<Submission, "id">) => {
+export const createSubmission = async (submission: Omit<Submission, "id" | "createdAt">) => {
   try {
-    const docRef = await addDoc(collection(db, "submissions"), submission);
-    return { id: docRef.id, ...submission };
+    const docRef = await addDoc(collection(db, "submissions"), {
+      ...submission,
+      createdAt: serverTimestamp()
+    });
+    return { id: docRef.id, ...submission, createdAt: new Date().toISOString() };
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, "submissions");
   }
@@ -201,7 +189,10 @@ export const createSubmission = async (submission: Omit<Submission, "id">) => {
 export const updateSubmission = async (id: string, data: Partial<Submission>) => {
   try {
     const docRef = doc(db, "submissions", id);
-    await updateDoc(docRef, data);
+    await updateDoc(docRef, {
+      ...data,
+      updatedAt: serverTimestamp()
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `submissions/${id}`);
   }
@@ -217,10 +208,6 @@ export const deleteSubmission = async (id: string) => {
 
 export async function testConnection() {
   try {
-    if (!navigator.onLine) {
-      console.warn("Device is offline. Using local cache.");
-      return;
-    }
     // Testing connection to a dummy doc
     await getDocFromServer(doc(db, 'system', 'connection-test'));
   } catch (error) {
