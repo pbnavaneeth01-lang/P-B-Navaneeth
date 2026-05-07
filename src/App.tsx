@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-import { onAuthStateChanged, User } from "firebase/auth";
-import { collection, query, where, orderBy, onSnapshot } from "firebase/firestore";
 import { 
   LayoutDashboard, 
   BookOpen, 
@@ -55,8 +53,7 @@ const ExamItem = React.lazy(() => import("./components/ExamItem").then(m => ({ d
 const SubmissionsView = React.lazy(() => import("./components/SubmissionsView").then(m => ({ default: m.SubmissionsView })));
 const AboutView = React.lazy(() => import("./components/AboutView").then(m => ({ default: m.AboutView })));
 
-import { auth, db, storage, signInWithGoogle, logout, createExam, updateExam, deleteExam, createSubmission, updateSubmission, deleteSubmission, handleFirestoreError, OperationType, testConnection } from "./firebase";
-import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from "firebase/storage";
+import { api } from "./lib/api";
 import { cn, fileToBase64, fixHtml2CanvasOklch } from "./lib/utils";
 import { Exam, Submission, AppFeature, EvaluationQuestion } from "./types";
 
@@ -207,15 +204,11 @@ const runWithConcurrency = async <T, R>(
 };
 
 const uploadFile = async (file: File, path: string): Promise<string> => {
-  const storageRef = ref(storage, `${path}/${Date.now()}_${file.name}`);
-  
   try {
-    // Fast direct upload path
-    await uploadBytes(storageRef, file);
-    return getDownloadURL(storageRef);
+    return (await fileToBase64(file)).data; // In SQLite mode, we store data in DB, so return the data string
   } catch (error: any) {
     console.error("Upload Error:", error);
-    throw new Error(`Failed to upload "${file.name}": ${error.message}`);
+    throw new Error(`Failed to process "${file.name}": ${error.message}`);
   }
 };
 
@@ -285,8 +278,15 @@ const SidebarItem = React.memo(({
 // --- Main App ---
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<any | null>({ uid: 'local_user', displayName: 'Local Admin' });
+  const signInWithGoogle = () => {
+    setUser({ uid: 'local_user', displayName: 'Local Admin' });
+  };
+
+  const logout = () => {
+    setUser(null);
+  };
+  const [loading, setLoading] = useState(false);
   const [activeFeature, setActiveFeature] = useState<AppFeature>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(window.innerWidth >= 1024);
   
@@ -401,70 +401,45 @@ export default function App() {
       initialLoader.style.opacity = '0';
       setTimeout(() => initialLoader.remove(), 500);
     }
-
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      console.log("Auth state changed:", u ? `User: ${u.uid}` : "No user");
-      setUser(u);
-      setLoading(false);
-      if (u) {
-        testConnection().catch(e => console.error("Test connection failed:", e));
-      }
-    });
-
-    // Safety timeout: if auth hasn't initialized in 8 seconds, force show login screen
-    const timeoutId = setTimeout(() => {
-      setLoading(prev => {
-        if (prev) {
-          console.warn("Auth initialization timed out, showing login screen anyway.");
-          return false;
-        }
-        return prev;
-      });
-    }, 8000);
-
-    return () => {
-      unsubscribe();
-      clearTimeout(timeoutId);
-    };
   }, []);
 
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, "exams"), where("uid", "==", user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setExams(snapshot.docs.map(d => {
-        const data = d.data();
-        return {
-          id: d.id,
-          ...data,
-          createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
-        } as Exam;
-      }));
-    }, (err) => {
-      console.error("Exams Snapshot Error:", err);
-      setError("Failed to sync exams. Please check your connection.");
-    });
-    return unsubscribe;
+    const fetchExams = async () => {
+      try {
+        const data = await api.getExams();
+        setExams(data);
+      } catch (err) {
+        console.error("Exams Fetch Error:", err);
+        setError("Failed to sync exams.");
+      }
+    };
+    fetchExams();
+    const inv = setInterval(fetchExams, 5000);
+    return () => clearInterval(inv);
   }, [user]);
 
   useEffect(() => {
     if (!user) return;
-    const q = query(collection(db, "submissions"), where("uid", "==", user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setSubmissions(snapshot.docs.map(d => {
-        const data = d.data();
-        return {
-          id: d.id,
-          ...data,
-          createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
-        } as Submission;
-      }));
-    }, (err) => {
-      console.error("Submissions Snapshot Error:", err);
-      setError("Failed to sync submissions. Please check your connection.");
-    });
-    return unsubscribe;
-  }, [user]);
+    const fetchSubmissions = async () => {
+      try {
+        // Fetch submissions for all exams to keep the local state updated
+        // For efficiency, we just fetch for selectedExamId if it exists
+        if (selectedExamId) {
+          const data = await api.getSubmissions(selectedExamId);
+          setSubmissions(prev => {
+            const otherSubs = prev.filter(s => s.examId !== selectedExamId);
+            return [...otherSubs, ...data];
+          });
+        }
+      } catch (err) {
+        console.error("Submissions Fetch Error:", err);
+      }
+    };
+    fetchSubmissions();
+    const inv = setInterval(fetchSubmissions, 5000);
+    return () => clearInterval(inv);
+  }, [user, selectedExamId]);
 
   const handleCreateExam = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -515,14 +490,10 @@ export default function App() {
       setUploadStatus("Finalizing exam...");
       setUploadProgress(100);
       
-      const result = await createExam({
-        uid: user.uid,
+      const result = await api.createExam({
         title: newExamTitle,
         questionPaperUrl: qpUrl,
         markingSchemeUrl: msUrl,
-        studentList: newExamStudentList.split('\n').map(s => s.trim()).filter(s => s !== ""),
-        qpPageCount: qpMeta?.pageCount,
-        msPageCount: msMeta?.pageCount
       });
       
       setIsCreatingExam(false);
@@ -636,7 +607,7 @@ export default function App() {
         extractedName = aiResult.studentName || tempName;
 
         setUploadStatus("Finishing...");
-        await createSubmission({
+        await api.createSubmission({
           uid: user!.uid,
           examId: selectedExamId,
           studentName: extractedName,
@@ -648,7 +619,7 @@ export default function App() {
         // If name already provided, just wait for upload
         const bookletUrl = await uploadPromise;
         setUploadStatus("Finishing...");
-        await createSubmission({
+        await api.createSubmission({
           uid: user!.uid,
           examId: selectedExamId,
           studentName: extractedName || (newBooklet.name.replace(/\.[^/.]+$/, "")),
@@ -723,7 +694,7 @@ export default function App() {
         
         const bookletUrl = await uploadFile(compressedFile, `submissions/${user.uid}/${selectedExamId}`);
 
-        const newSubmission = await createSubmission({
+        const newSubmission = await api.createSubmission({
           uid: user.uid,
           examId: selectedExamId,
           studentName: tempStudentName,
@@ -744,7 +715,7 @@ export default function App() {
               const bookletDataForAI = await getFirstPageAsImage(file);
               const details = await extractStudentDetails(bookletDataForAI);
               if (details.studentName && details.studentName !== "Unknown") {
-                await updateSubmission(newSubmission.id, { studentName: details.studentName });
+                await api.updateSubmission(newSubmission.id, { studentName: details.studentName });
               }
             } catch (err) {
               console.warn(`Background AI scan failed for ${file.name}`);
@@ -808,7 +779,7 @@ export default function App() {
       console.log("Starting AI evaluation...");
       const result = await evaluateExam(qp, ms, booklet);
       
-      await updateSubmission(submission.id!, {
+      await api.updateSubmission(submission.id!, {
         status: "evaluated",
         totalMarks: result.totalMarks,
         maxMarks: result.maxMarks,
@@ -886,7 +857,7 @@ export default function App() {
           console.log(`Starting AI evaluation for ${submission.studentName}...`);
           const result = await evaluateExam(qp, ms, booklet);
           
-          await updateSubmission(submission.id!, {
+          await api.updateSubmission(submission.id!, {
             status: "evaluated",
             totalMarks: result.totalMarks,
             maxMarks: result.maxMarks,
@@ -914,7 +885,7 @@ export default function App() {
     
     setLoading(true);
     try {
-      await updateExam(editingExam.id, {
+      await api.updateExam(editingExam.id, {
         title: editingExam.title,
         studentList: editingExam.studentList
       });
@@ -935,10 +906,10 @@ export default function App() {
       // Delete associated submissions first
       const associatedSubmissions = submissions.filter(s => s.examId === id);
       for (const sub of associatedSubmissions) {
-        if (sub.id) await deleteSubmission(sub.id);
+        if (sub.id) await api.deleteSubmission(sub.id);
       }
       
-      await deleteExam(id);
+      await api.deleteExam(id);
       if (selectedExamId === id) setSelectedExamId(null);
     } catch (error: any) {
       console.error("Delete Exam Error:", error);
@@ -1061,7 +1032,7 @@ export default function App() {
     setLoading(true);
     let success = 0;
     try {
-      await Promise.all(ids.map(id => updateSubmission(id, { status })));
+      await Promise.all(ids.map(id => api.updateSubmission(id, { status })));
       success = ids.length;
       showToast(`Successfully updated ${success} submissions to ${status}.`, "success");
     } catch (err: any) {
@@ -1557,8 +1528,7 @@ export default function App() {
                     const tid = showToast("Configuring Evaluation Environment", "loading");
                     try {
                       const samplePdf = "data:application/pdf;base64,JVBERi0xLjcKJeLjz9MKMSAwIG9iagogIDw8IC9UeXBlIC9DYXRhbG9nIC9QYWdlcyAyIDAgUiA+PgplbmRvYmoKMiAwIG9iagogIDw8IC9UeXBlIC9QYWdlcyAvQ291bnQgMSAvS2lkcyBbIDMgMCBSIF0gPj4KZW5kb2JqCjMgMCBvYmoKICA8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1Jlc291cmNlcyA0IDAgUiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmogIDw8ID4+IGVuZG9iago1IDAgb2JqCiAgPDwgL0xlbmd0aCA0NCA+PiBzdHJlYW0KICAwIDAgMCAxIEsgYmYgQlQKICAvRjEgMjQgVGYgMTAwIDcwMCBUZCAoR3JhZGVNYXN0ZXIgRGVtb3EpIFRqIEVUCiAgZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyMzggMDAwMDAgbiAKMDAwMDAwMDI1OCAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM1MgolJUVPRgo=";
-                      const exam = await createExam({
-                        uid: user.uid,
+                      const exam = await api.createExam({
                         title: "Quantum Physics: Wave-Particle Duality Master",
                         questionPaperUrl: samplePdf,
                         markingSchemeUrl: samplePdf,
@@ -1567,8 +1537,7 @@ export default function App() {
 
                       if (exam && exam.id) {
                         // Submission 1: Excellent Perfect
-                        await createSubmission({
-                          uid: user.uid,
+                        await api.createSubmission({
                           examId: exam.id,
                           studentName: "John Doe",
                           bookletUrl: samplePdf,
@@ -1599,8 +1568,7 @@ export default function App() {
                         });
 
                         // Submission 2: Partial / Incomplete
-                        await createSubmission({
-                          uid: user.uid,
+                        await api.createSubmission({
                           examId: exam.id,
                           studentName: "Jane Smith",
                           bookletUrl: samplePdf,
@@ -1631,8 +1599,7 @@ export default function App() {
                         });
 
                         // Submission 3: Mixed Errors
-                        await createSubmission({
-                          uid: user.uid,
+                        await api.createSubmission({
                           examId: exam.id,
                           studentName: "Xavier Chen",
                           bookletUrl: samplePdf,
@@ -1883,7 +1850,7 @@ export default function App() {
                   onAddSubmission={() => setIsAddingSubmission(true)}
                   onBulkAddSubmissions={() => setIsBulkAddingSubmissions(true)}
                   onExportCSV={() => exportGradesCSV()}
-                  onDeleteSubmission={deleteSubmission}
+                  onDeleteSubmission={api.deleteSubmission}
                   onBulkStatusUpdate={handleBulkStatusUpdate}
                   isEvaluating={isEvaluating}
                   isOnline={isOnline}
@@ -2142,7 +2109,7 @@ export default function App() {
                               const list = newExamStudentList.split('\n').map(s => s.trim()).filter(s => s !== "");
                               setLoading(true);
                               try {
-                                await updateExam(isManagingStudents, { studentList: list });
+                                await api.updateExam(isManagingStudents, { studentList: list });
                                 setIsManagingStudents(null);
                                 setNewExamStudentList("");
                               } catch (e) {
