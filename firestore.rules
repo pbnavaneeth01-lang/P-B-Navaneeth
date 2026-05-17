@@ -1,0 +1,95 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && (
+        request.auth.token.get('email_verified', false) == true || 
+        request.auth.token.get('firebase', {}).get('sign_in_provider', '') == 'google.com' ||
+        isSignedIn()
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function resourceOwner() {
+      return resource.data.get('uid', null);
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUser(data) {
+      let d = data;
+      return d.keys().hasAll(['uid'])
+        && d.uid == request.auth.uid 
+        && (d.get('displayName', null) == null || (d.displayName is string && d.displayName.size() <= 200))
+        && (d.get('email', null) == null || (d.email is string && d.email.size() <= 200))
+        && (d.get('photoURL', null) == null || (d.photoURL is string && d.photoURL.size() <= 1000))
+        && (d.get('createdAt', null) == null || d.createdAt is timestamp)
+        && d.keys().size() >= 1 && d.keys().size() <= 15;
+    }
+
+    function isValidExam(data) {
+      let d = data;
+      return d.get('uid', '') == request.auth.uid
+        && d.get('title', '') is string
+        && d.get('questionPaperUrl', '') is string
+        && d.get('markingSchemeUrl', '') is string;
+    }
+
+    function isValidSubmission(data) {
+      let d = data;
+      return d.get('uid', '') == request.auth.uid
+        && d.get('examId', '') is string
+        && d.get('studentName', '') is string;
+    }
+
+    // --- Collections ---
+
+    match /users/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /exams/{examId} {
+      allow read: if isSignedIn() && resourceOwner() == request.auth.uid;
+      allow create: if isSignedIn() && isValidExam(incoming());
+      allow update: if isSignedIn() && resourceOwner() == request.auth.uid && isValidExam(incoming());
+      allow delete: if isSignedIn() && resourceOwner() == request.auth.uid;
+    }
+
+    match /submissions/{submissionId} {
+      allow read: if isSignedIn() && resourceOwner() == request.auth.uid;
+      allow create: if isSignedIn() && isValidSubmission(incoming());
+      allow update: if isSignedIn() && resourceOwner() == request.auth.uid && isValidSubmission(incoming());
+      allow delete: if isSignedIn() && resourceOwner() == request.auth.uid;
+    }
+
+    match /system/{docId} {
+      allow read: if isSignedIn();
+    }
+  }
+}

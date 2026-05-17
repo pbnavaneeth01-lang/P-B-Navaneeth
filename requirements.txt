@@ -1,5 +1,4 @@
-streamlit
+flask
 google-generativeai
-fpdf2
+Pillow
 python-dotenv
-pandas

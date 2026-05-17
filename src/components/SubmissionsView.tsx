@@ -28,13 +28,15 @@ export const SubmissionItem = React.memo(({
   onEvaluate,
   onDelete,
   isSelected,
-  onToggleSelect
+  onToggleSelect,
+  isOnline
 }: { 
   submission: Submission; 
   onEvaluate: () => void;
   onDelete: () => void;
   isSelected?: boolean;
   onToggleSelect?: () => void;
+  isOnline?: boolean;
 }) => (
   <motion.div 
     layout
@@ -95,13 +97,13 @@ export const SubmissionItem = React.memo(({
       <div className="flex items-center justify-center sm:justify-start gap-3 mt-2 font-mono text-[10px]">
         <span className="text-slate-500 uppercase tracking-widest">{new Date(submission.createdAt).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}</span>
         <div className="w-1 h-1 rounded-full bg-slate-800" />
-        <span className="text-slate-600 uppercase tracking-widest">{submission.pageCount || 0} Pages Ingested</span>
+        <span className="text-slate-600 uppercase tracking-widest">{submission.pageCount || 0} Pages</span>
       </div>
     </div>
 
     {submission.status === "evaluated" && (
       <div className="bg-slate-950/50 px-8 py-4 rounded-3xl border border-slate-800/50 shadow-inner flex flex-col items-center justify-center relative z-10">
-        <p className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.2em] mb-1">Normalized Score</p>
+        <p className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.2em] mb-1">Score</p>
         <div className="flex items-baseline gap-1.5">
           <span className="text-blue-400 font-black text-3xl tracking-tighter leading-none">{submission.totalMarks}</span>
           <span className="text-slate-700 font-mono text-xs">/</span>
@@ -111,31 +113,40 @@ export const SubmissionItem = React.memo(({
     )}
 
     <div className="flex items-center gap-3 w-full sm:w-auto relative z-10">
-      <button 
-        onClick={onEvaluate}
-        className={cn(
-          "flex-1 sm:flex-none px-8 py-4 rounded-[18px] font-black uppercase tracking-widest text-[10px] transition-all duration-300 shadow-2xl active:scale-95 whitespace-nowrap",
-          submission.status === "evaluated" 
-            ? "bg-slate-800 text-white hover:bg-slate-700 border border-slate-700" 
-            : "bg-blue-600 text-white hover:bg-blue-500 shadow-blue-500/20"
-        )}
-      >
-        {submission.status === "evaluated" ? "Review Batch" : "Execute AI Evaluation"}
-      </button>
+      {submission.status === "pending" && !isOnline ? (
+        <div className="flex-1 sm:flex-none px-6 py-4 rounded-[18px] bg-slate-800 text-slate-500 font-bold uppercase tracking-widest text-[10px] border border-slate-700 flex items-center gap-2 cursor-not-allowed">
+          <AlertCircle className="w-4 h-4" />
+          Offline
+        </div>
+      ) : (
+        <button 
+          onClick={onEvaluate}
+          disabled={!isOnline && submission.status === "pending"}
+          className={cn(
+            "flex-1 sm:flex-none px-8 py-4 rounded-[18px] font-black uppercase tracking-widest text-[10px] transition-all duration-300 shadow-2xl active:scale-95 whitespace-nowrap",
+            submission.status === "evaluated" 
+              ? "bg-slate-800 text-white hover:bg-slate-700 border border-slate-700" 
+              : "bg-blue-600 text-white hover:bg-blue-500 shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+          )}
+        >
+          {submission.status === "evaluated" ? "Review results" : "Grade"}
+        </button>
+      )}
       <a 
         href={submission.bookletUrl}
         target={submission.bookletUrl.startsWith('data:') ? undefined : "_blank"}
         rel="noopener noreferrer"
         download={`Submission_${submission.studentName}.pdf`}
         className="p-4 text-slate-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-2xl transition-all shadow-inner border border-transparent hover:border-blue-500/20"
-        title="Download Node Data"
+        title="Download File"
       >
         <Download className="w-5 h-5" />
       </a>
       <button 
-        onClick={onDelete}
-        className="p-4 text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-2xl transition-all shadow-inner border border-transparent hover:border-rose-500/20"
-        title="Flush Record"
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        className="p-4 text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-2xl transition-all shadow-inner border border-transparent hover:border-rose-500/20 cursor-pointer"
+        title="Delete"
       >
         <Trash2 className="w-5 h-5" />
       </button>
@@ -165,7 +176,7 @@ export const SubmissionsView = React.memo(({
   onAddSubmission: () => void;
   onBulkAddSubmissions: () => void;
   onExportCSV: () => void;
-  onDeleteSubmission: (id: string) => void;
+  onDeleteSubmission: (id: string | string[]) => void;
   onBulkStatusUpdate?: (ids: string[], status: "pending" | "evaluated") => void;
   isEvaluating: boolean;
   isOnline: boolean;
@@ -223,16 +234,36 @@ export const SubmissionsView = React.memo(({
           >
             <ArrowLeft className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
           </button>
-          <div className="space-y-4">
-            <div className="flex items-center gap-3">
-               <div className="w-1 h-10 bg-blue-600 rounded-full" />
-               <div>
-                  <h1 className="text-4xl font-display font-black text-white italic tracking-tighter leading-none">{exam?.title || "Exam Submissions"}</h1>
-                  <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Submission Ingestion Pipeline</p>
-               </div>
-            </div>
-            <p className="text-slate-400 font-medium max-w-xl leading-relaxed text-sm">Managing the secure intake and semantic analysis of student response booklets for consolidated grading.</p>
-          </div>
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-8">
+                  <div className="flex items-center gap-3">
+                     <div className="w-1 h-10 bg-blue-600 rounded-full" />
+                     <div>
+                        <h1 className="text-4xl font-display font-black text-white italic tracking-tighter leading-none">{exam?.title || "Exam Submissions"}</h1>
+                        <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Grading List</p>
+                     </div>
+                  </div>
+                  {exam && (
+                    <div className="flex items-center gap-3 ml-4 sm:ml-0">
+                      <button 
+                        onClick={() => window.open(exam.questionPaperUrl, '_blank')}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-500/10 border border-blue-500/20 rounded-xl text-[10px] font-black text-blue-400 uppercase tracking-widest hover:bg-blue-500 hover:text-white transition-all shadow-lg shadow-blue-500/5 active:scale-95"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        View QP
+                      </button>
+                      <button 
+                        onClick={() => window.open(exam.markingSchemeUrl, '_blank')}
+                        className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-[10px] font-black text-emerald-400 uppercase tracking-widest hover:bg-emerald-500 hover:text-white transition-all shadow-lg shadow-emerald-500/5 active:scale-95"
+                      >
+                        <CheckCircle className="w-3.5 h-3.5" />
+                        View MS
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <p className="text-slate-400 font-medium max-w-xl leading-relaxed text-sm">Grading student booklets for this exam.</p>
+              </div>
         </div>
         
         <div className="flex items-center gap-3">
@@ -253,7 +284,7 @@ export const SubmissionsView = React.memo(({
                   (selectedIds.length > 0 && selectedIds.length === filtered.length) ? "scale-100" : "scale-0"
                 )} />
               </div>
-              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest leading-none group-hover:text-slate-300 transition-colors">Select All Nodes</span>
+              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest leading-none group-hover:text-slate-300 transition-colors">Select All</span>
             </label>
           </div>
           <div className="hidden sm:flex items-center gap-1 p-1.5 bg-slate-900 border border-slate-800 rounded-2xl">
@@ -273,9 +304,9 @@ export const SubmissionsView = React.memo(({
       <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
         {[
           { label: "Total Students", value: stats.total, icon: Users, color: "text-blue-400", bg: "bg-blue-400/10" },
-          { label: "AI Processed", value: stats.evaluated, icon: CheckCircle, color: "text-emerald-400", bg: "bg-emerald-400/10" },
-          { label: "Review Queue", value: stats.pending, icon: AlertCircle, color: "text-orange-400", bg: "bg-orange-400/10" },
-          { label: "Aggregate %", value: `${stats.avgScore}%`, icon: BrainCircuit, color: "text-purple-400", bg: "bg-purple-400/10" },
+          { label: "Booklets Processed", value: stats.evaluated, icon: CheckCircle, color: "text-emerald-400", bg: "bg-emerald-400/10" },
+          { label: "Grading Required", value: stats.pending, icon: AlertCircle, color: "text-orange-400", bg: "bg-orange-400/10" },
+          { label: "Average Score", value: `${stats.avgScore}%`, icon: BrainCircuit, color: "text-purple-400", bg: "bg-purple-400/10" },
         ].map((item, i) => (
           <div key={i} className="p-6 rounded-[32px] border border-slate-800/60 bg-slate-900/40 backdrop-blur-xl flex flex-col gap-4 group">
             <div className={cn("w-12 h-12 rounded-2xl flex items-center justify-center border", item.bg, item.color.replace('text-', 'border-').replace('400', '500').concat('/20'))}>
@@ -303,8 +334,8 @@ export const SubmissionsView = React.memo(({
                   {selectedIds.length}
                 </div>
                 <div>
-                  <p className="text-xs font-black text-white uppercase tracking-widest">Active Selection</p>
-                  <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest mt-0.5">Bulk Matrix Operations</p>
+                  <p className="text-xs font-black text-white uppercase tracking-widest">Selection</p>
+                  <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest mt-0.5">Bulk grading</p>
                 </div>
               </div>
 
@@ -322,12 +353,7 @@ export const SubmissionsView = React.memo(({
                   Reset Status
                 </button>
                 <button 
-                  onClick={() => {
-                    if (window.confirm(`Delete ${selectedIds.length} submissions? This operation is IRREVERSIBLE.`)) {
-                      selectedIds.forEach(id => onDeleteSubmission(id));
-                      setSelectedIds([]);
-                    }
-                  }}
+                  onClick={() => onDeleteSubmission(selectedIds)}
                   className="p-3 text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-2xl transition-all"
                   title="Purge Selection"
                 >
@@ -375,6 +401,7 @@ export const SubmissionsView = React.memo(({
               <SubmissionItem 
                 key={sub.id} 
                 submission={sub} 
+                isOnline={isOnline}
                 onEvaluate={() => onSingleEvaluate(sub)} 
                 onDelete={() => onDeleteSubmission(sub.id!)} 
                 isSelected={selectedIds.includes(sub.id!)}
@@ -387,10 +414,10 @@ export const SubmissionsView = React.memo(({
                   <FileText className="w-12 h-12 opacity-20" />
                 </div>
                 <p className="text-xl font-bold text-slate-400 italic">
-                  {searchQuery ? "No matching identifiers found." : "Node database is empty."}
+                  {searchQuery ? "No matching records found." : "Submission list is empty."}
                 </p>
                 <p className="text-xs uppercase font-mono tracking-widest mt-3 text-slate-600">
-                   System ready for content ingestion.
+                   Ready for uploads.
                 </p>
               </div>
             )}
@@ -403,7 +430,7 @@ export const SubmissionsView = React.memo(({
             <div className="absolute top-0 right-0 p-6 opacity-[0.03] group-hover:opacity-[0.05] transition-opacity pointer-events-none rotate-12">
                <Cpu className="w-48 h-48" />
             </div>
-            <h4 className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.3em] mb-8 px-1">Pipeline Control</h4>
+            <h4 className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.3em] mb-8 px-1">Actions</h4>
             <div className="space-y-4">
               <button 
                 onClick={onBulkEvaluate}
@@ -414,8 +441,8 @@ export const SubmissionsView = React.memo(({
                   {isEvaluating ? <Loader2 className="w-6 h-6 animate-spin" /> : <Sparkles className="w-6 h-6" />}
                 </div>
                 <div className="text-left">
-                  <p className="text-xs uppercase tracking-widest">Execute Bulk</p>
-                  <p className="text-[10px] text-blue-200/50 font-mono mt-1">Parallel AI Matrix</p>
+                  <p className="text-xs uppercase tracking-widest">Grade All</p>
+                  <p className="text-[10px] text-blue-200/50 font-mono mt-1">AI Automated</p>
                 </div>
               </button>
               
@@ -428,11 +455,11 @@ export const SubmissionsView = React.memo(({
                   <Upload className="w-6 h-6" />
                 </div>
                 <div className="text-left">
-                  <p className="text-xs uppercase tracking-widest">Batch Ingest</p>
-                  <p className="text-[10px] text-slate-600 font-mono mt-1">ZIP / Multiple Nodes</p>
+                  <p className="text-xs uppercase tracking-widest">Bulk Upload</p>
+                  <p className="text-[10px] text-slate-600 font-mono mt-1">ZIP / Files</p>
                 </div>
               </button>
-
+              
               <button 
                 onClick={onExportCSV}
                 className="w-full group/btn flex items-center gap-5 p-6 rounded-[28px] bg-emerald-600/5 border border-emerald-600/10 text-emerald-400 font-black hover:bg-emerald-600/10 hover:border-emerald-500/30 transition-all outline-none"
@@ -441,8 +468,8 @@ export const SubmissionsView = React.memo(({
                   <Download className="w-6 h-6" />
                 </div>
                 <div className="text-left">
-                  <p className="text-xs uppercase tracking-widest">Data Export</p>
-                  <p className="text-[10px] text-emerald-600/40 font-mono mt-1">CSV Graded Matrix</p>
+                  <p className="text-xs uppercase tracking-widest">Export Grades</p>
+                  <p className="text-[10px] text-emerald-600/40 font-mono mt-1">CSV Format</p>
                 </div>
               </button>
             </div>
@@ -452,8 +479,8 @@ export const SubmissionsView = React.memo(({
              <div className="w-20 h-20 bg-indigo-600/10 rounded-3xl flex items-center justify-center mb-6 border border-indigo-500/20 group-hover:scale-110 transition-transform duration-700">
                 <BrainCircuit className="w-10 h-10 text-indigo-400" />
              </div>
-             <p className="text-xs font-black text-indigo-400 uppercase tracking-[0.2em] mb-4">Semantic Core Active</p>
-             <p className="text-xs text-slate-500 leading-relaxed max-w-[200px]">The AI interface is calibrated and ready for high-concurrency evaluation of OCR-converted booklets.</p>
+             <p className="text-xs font-black text-indigo-400 uppercase tracking-[0.2em] mb-4">AI Ready</p>
+             <p className="text-xs text-slate-500 leading-relaxed max-w-[200px]">The AI is ready to grade uploaded student booklets.</p>
           </div>
         </div>
       </div>

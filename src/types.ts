@@ -16,6 +16,8 @@ export interface Exam {
   createdAt: string;
   qpPageCount?: number;
   msPageCount?: number;
+  syncStatus?: "ready" | "syncing" | "error";
+  status?: string; // Legacy or alternative status
 }
 
 export interface EvaluationQuestion {
@@ -35,6 +37,7 @@ export interface Submission {
   studentName: string;
   bookletUrl: string;
   status: "pending" | "evaluated";
+  syncStatus?: "ready" | "syncing" | "error";
   totalMarks?: number;
   maxMarks?: number;
   pageCount?: number;
@@ -45,4 +48,4 @@ export interface Submission {
   createdAt: string;
 }
 
-export type AppFeature = "dashboard" | "exams" | "submissions" | "students" | "evaluate" | "about";
+export type AppFeature = "dashboard" | "exams" | "submissions" | "students" | "evaluate" | "about" | "bulk" | "settings";

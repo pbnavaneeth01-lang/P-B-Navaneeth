@@ -36,19 +36,19 @@ export const DashboardView = React.memo(({
               <h1 className="text-5xl font-display font-black text-white italic tracking-tighter leading-none">
                 GradeMaster
               </h1>
-              <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Evaluation Control Center</p>
+              <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Evaluation Overview</p>
              </div>
           </div>
-          <p className="text-slate-400 text-lg font-medium max-w-xl leading-relaxed">System-wide performance metrics and automated grading status for active academic tracks.</p>
+          <p className="text-slate-400 text-lg font-medium max-w-xl leading-relaxed">Performance metrics and grading status for exams.</p>
         </div>
         
         <div className="flex items-center gap-6 bg-slate-900/50 backdrop-blur-xl border border-slate-800 p-6 rounded-[28px] technical-border">
           <div className="text-right">
-             <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">Global Health</p>
-             <p className="text-sm font-black text-emerald-400 uppercase tracking-tight">System Nominal</p>
+             <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">Status</p>
+             <p className="text-sm font-black text-emerald-400 uppercase tracking-tight">All Online</p>
           </div>
           <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
-             <Cpu className="text-emerald-400 w-6 h-6 animate-pulse" />
+             <CheckCircle className="text-emerald-400 w-6 h-6" />
           </div>
         </div>
       </div>
@@ -69,9 +69,9 @@ export const DashboardView = React.memo(({
           <div className="flex items-center justify-between mb-10">
             <div>
               <h2 className="text-2xl font-display font-black text-white italic">Recent Exam Papers</h2>
-              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Master Source Database</p>
+              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Exam List</p>
             </div>
-            <button className="text-xs font-black text-blue-500 uppercase tracking-widest hover:text-blue-400 transition-colors">View All Archive</button>
+            <button className="text-xs font-black text-blue-500 uppercase tracking-widest hover:text-blue-400 transition-colors">View All</button>
           </div>
 
           <div className="space-y-3">
@@ -90,7 +90,7 @@ export const DashboardView = React.memo(({
                     <div className="flex items-center gap-3 mt-1">
                        <span className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">{new Date(exam.createdAt).toLocaleDateString()}</span>
                        <div className="w-1 h-1 rounded-full bg-slate-800" />
-                       <span className="text-[10px] font-mono text-blue-500 uppercase tracking-widest">Master Active</span>
+                       <span className="text-[10px] font-mono text-blue-500 uppercase tracking-widest">Active</span>
                     </div>
                   </div>
                 </div>
@@ -104,21 +104,21 @@ export const DashboardView = React.memo(({
                 <div className="w-20 h-20 bg-slate-800/50 rounded-3xl flex items-center justify-center mb-6">
                   <BookOpen className="w-10 h-10 text-slate-600" />
                 </div>
-                <p className="text-slate-400 font-medium mb-8 max-w-xs leading-relaxed">No assessment master papers have been initialized. Commencing setup is required.</p>
+                <p className="text-slate-400 font-medium mb-8 max-w-xs leading-relaxed">No exams added yet. Please add an exam to start.</p>
                 <div className="flex flex-col sm:flex-row items-center gap-4">
                   <button 
                     onClick={() => onNavigate("exams")}
                     className="px-10 py-4 bg-blue-600 text-white font-black uppercase tracking-widest text-xs rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-500/20 active:scale-95 flex items-center gap-3"
                   >
                     <Plus className="w-4 h-4" />
-                    <span>Initialize Exam Master</span>
+                    <span>Add New Exam</span>
                   </button>
                   {onLoadSample && (
                     <button 
                       onClick={onLoadSample}
                       className="px-10 py-4 bg-slate-800 text-slate-300 font-black uppercase tracking-widest text-xs rounded-2xl hover:bg-slate-700 hover:text-white transition-all border border-slate-700 active:scale-95 flex items-center gap-3"
                     >
-                      <span>Load Sample Logic</span>
+                      <span>Load Sample Data</span>
                     </button>
                   )}
                 </div>
@@ -130,11 +130,11 @@ export const DashboardView = React.memo(({
         <div className="p-8 sm:p-10 rounded-[40px] bg-slate-900 border border-slate-800 shadow-2xl relative overflow-hidden">
           <div className="flex items-center justify-between mb-10">
             <div>
-              <h2 className="text-2xl font-display font-black text-white italic leading-tight">Priority Stack</h2>
-              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Awaiting Review</p>
+              <h2 className="text-2xl font-display font-black text-white italic leading-tight">Upcoming Tasks</h2>
+              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Pending Review</p>
             </div>
             <div className="px-3 py-1 bg-orange-500/10 border border-orange-500/20 rounded-lg">
-               <span className="text-[10px] font-mono text-orange-400 uppercase tracking-widest">Action Required</span>
+               <span className="text-[10px] font-mono text-orange-400 uppercase tracking-widest">Tasks</span>
             </div>
           </div>
 
@@ -147,7 +147,7 @@ export const DashboardView = React.memo(({
                   </div>
                   <div className="min-w-0">
                     <p className="font-bold text-slate-200 truncate">{sub.studentName}</p>
-                    <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">Pending Semantics</p>
+                    <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">Awaiting Review</p>
                   </div>
                 </div>
                 <button 
@@ -163,8 +163,8 @@ export const DashboardView = React.memo(({
                 <div className="w-20 h-20 bg-emerald-500/5 rounded-full flex items-center justify-center mb-6">
                   <CheckCircle className="w-10 h-10 text-emerald-500/40" />
                 </div>
-                <p className="text-sm font-bold uppercase tracking-widest text-slate-600">All Nodes Decrypted</p>
-                <p className="text-xs mt-2 max-w-[180px] mx-auto text-slate-700 leading-relaxed">No student booklets are currently in the evaluation queue.</p>
+                <p className="text-sm font-bold uppercase tracking-widest text-slate-600">All Graded</p>
+                <p className="text-xs mt-2 max-w-[180px] mx-auto text-slate-700 leading-relaxed">No student booklets are currently awaiting review.</p>
               </div>
             )}
           </div>
@@ -172,9 +172,9 @@ export const DashboardView = React.memo(({
           <div className="mt-10 p-6 rounded-3xl bg-blue-600/10 border border-blue-500/10 group cursor-default">
              <div className="flex items-center gap-3 mb-2">
                 <BrainCircuit className="w-5 h-5 text-blue-400" />
-                <p className="text-xs font-black text-blue-400 uppercase tracking-widest">AI Co-Pilot</p>
+                <p className="text-xs font-black text-blue-400 uppercase tracking-widest">Grading Status</p>
              </div>
-             <p className="text-xs text-slate-400 leading-relaxed group-hover:text-slate-300 transition-colors">Gemini-1.5 is monitoring the ingestion pipeline. Ready for batch semantic evaluation.</p>
+             <p className="text-xs text-slate-400 leading-relaxed group-hover:text-slate-300 transition-colors">The grading engine is ready to evaluate submissions.</p>
           </div>
         </div>
       </div>

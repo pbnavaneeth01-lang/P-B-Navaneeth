@@ -1,0 +1,5 @@
+{
+  "name": "GradeMaster",
+  "description": "AI-powered exam evaluation suite. Upload question papers, marking schemes, and student booklets for automated grading and annotated PDF exports.",
+  "requestFramePermissions": []
+}

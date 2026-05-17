@@ -1,5 +1,11 @@
 {
-  "name": "GradeMaster",
-  "description": "AI-powered exam evaluation suite. Upload question papers, marking schemes, and student booklets for automated grading and annotated PDF exports.",
-  "requestFramePermissions": []
+  "name": "GradeMaster AI",
+  "description": "An elite AI-powered exam evaluation system supporting handwriting recognition, multi-language grading, and local storage synchronization.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

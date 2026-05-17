@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import type { User } from "firebase/auth";
+import { collection, query, where, orderBy, onSnapshot, serverTimestamp } from "firebase/firestore";
 import { 
   LayoutDashboard, 
   BookOpen, 
@@ -25,7 +28,12 @@ import {
   Info,
   ShieldCheck,
   Cpu,
-  BookMarked
+  BookMarked,
+  AlertTriangle,
+  Settings,
+  User as UserIcon,
+  Camera,
+  Folders
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useDropzone } from "react-dropzone";
@@ -53,9 +61,12 @@ const ExamItem = React.lazy(() => import("./components/ExamItem").then(m => ({ d
 const SubmissionsView = React.lazy(() => import("./components/SubmissionsView").then(m => ({ default: m.SubmissionsView })));
 const AboutView = React.lazy(() => import("./components/AboutView").then(m => ({ default: m.AboutView })));
 
-import { api } from "./lib/api";
+import { auth, db, storage, signInWithGoogle, logout, createExam, updateExam, deleteExam, createSubmission, updateSubmission, deleteSubmission, handleFirestoreError, OperationType, testConnection } from "./firebase";
+import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from "firebase/storage";
 import { cn, fileToBase64, fixHtml2CanvasOklch } from "./lib/utils";
 import { Exam, Submission, AppFeature, EvaluationQuestion } from "./types";
+import { storeFile, getFileUrl, deleteFile, clearAllFiles, getFileBlob } from "./lib/offline-storage";
+import { NativeStorageConfig, requestNativeFolder, verifyPermission, saveFileToNative, getFileFromNative, isRunningInIframe, isNativeStorageSupported } from "./lib/native-fs";
 
 // --- Utils ---
 
@@ -79,20 +90,19 @@ const validateFile = async (file: File, allowedTypes: string[]): Promise<string 
     return `File "${file.name}" appears to be empty or corrupted.`;
   }
 
-  // Deeper PDF Validation
+  // Lightweight PDF Validation
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
   if (isPdf) {
-    try {
-      await getPdfMetadata(file);
-    } catch (err: any) {
-      return err.message || "Invalid PDF file.";
+    // Only check if it's not empty, heavy metadata check happens later in main flow
+    if (file.size < 10) {
+      return `The file "${file.name}" appears to be invalid or empty.`;
     }
   }
 
   return null;
 };
 
-const getPdfMetadata = async (file: File): Promise<{ pageCount: number } | null> => {
+const getPdfInfo = async (file: File, extractFirstPage: boolean = false): Promise<{ pageCount: number; firstPage?: { data: string; mimeType: string } } | null> => {
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
   if (!isPdf) return null;
 
@@ -100,67 +110,12 @@ const getPdfMetadata = async (file: File): Promise<{ pageCount: number } | null>
     const pdfjs = await loadPdfjs();
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-    return {
+    
+    const result: { pageCount: number; firstPage?: { data: string; mimeType: string } } = {
       pageCount: pdf.numPages
     };
-  } catch (error) {
-    console.error("PDF Validation Error:", error);
-    throw new Error(`The file "${file.name}" is not a valid PDF or is corrupted.`);
-  }
-};
 
-const compressFile = async (file: File, isForAI: boolean = false): Promise<File> => {
-  // Check if file is small enough to skip compression
-  const SKIP_COMPRESSION_SIZE = isForAI ? 150 * 1024 : 500 * 1024; // 150KB for AI, 500KB for display
-  if (file.size < SKIP_COMPRESSION_SIZE) return file;
-
-  // Only compress images
-  const isImage = file.type.startsWith('image/') || 
-                 /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name);
-                 
-  if (!isImage) return file;
-
-  try {
-    const imageCompression = (await import('browser-image-compression')).default;
-    const options = {
-      maxSizeMB: isForAI ? 0.2 : 0.7, 
-      maxWidthOrHeight: isForAI ? 1000 : 1600, 
-      useWebWorker: true,
-      initialQuality: isForAI ? 0.5 : 0.7,
-      alwaysKeepResolution: false
-    };
-
-    const compressedBlob = await imageCompression(file, options);
-    return new File([compressedBlob], file.name, {
-      type: file.type,
-      lastModified: Date.now(),
-    });
-  } catch (error: any) {
-    console.warn("Compression error, using original:", error);
-    return file;
-  }
-};
-
-const getFirstPageAsImage = async (file: File): Promise<{ data: string; mimeType: string }> => {
-  const isImage = file.type.startsWith('image/') || 
-                 /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name);
-
-  if (isImage) {
-    const compressed = await compressFile(file, true);
-    const b64 = await fileToBase64(compressed);
-    // Ensure we have a valid image mime type for Gemini
-    if (!b64.mimeType.startsWith('image/')) {
-      b64.mimeType = 'image/jpeg'; 
-    }
-    return b64;
-  }
-
-  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-  if (isPdf) {
-    try {
-      const pdfjs = await loadPdfjs();
-      const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    if (extractFirstPage && pdf.numPages > 0) {
       const page = await pdf.getPage(1);
       const viewport = page.getViewport({ scale: 1.5 });
       const canvas = document.createElement('canvas');
@@ -170,13 +125,36 @@ const getFirstPageAsImage = async (file: File): Promise<{ data: string; mimeType
       
       await page.render({ canvasContext: context!, viewport, canvas }).promise;
       const base64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-      return { data: base64, mimeType: 'image/jpeg' };
-    } catch (err) {
-      console.warn("PDF first page extraction failed, using full file:", err);
-      return fileToBase64(file);
+      result.firstPage = { data: base64, mimeType: 'image/jpeg' };
     }
+
+    return result;
+  } catch (error) {
+    console.error("PDF Processing Error:", error);
+    throw new Error(`The file "${file.name}" is not a valid PDF or is corrupted.`);
+  }
+};
+
+const getPdfMetadata = async (file: File) => {
+  const info = await getPdfInfo(file, false);
+  return info;
+};
+
+const getFirstPageAsImage = async (file: File): Promise<{ data: string; mimeType: string }> => {
+  const isImage = file.type.startsWith('image/') || 
+                 /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name);
+
+  if (isImage) {
+    const b64 = await fileToBase64(file);
+    if (!b64.mimeType.startsWith('image/')) {
+      b64.mimeType = 'image/jpeg'; 
+    }
+    return b64;
   }
 
+  const info = await getPdfInfo(file, true);
+  if (info?.firstPage) return info.firstPage;
+  
   return fileToBase64(file);
 };
 
@@ -203,43 +181,104 @@ const runWithConcurrency = async <T, R>(
   return results;
 };
 
-const uploadFile = async (file: File, path: string): Promise<string> => {
-  try {
-    return (await fileToBase64(file)).data; // In SQLite mode, we store data in DB, so return the data string
-  } catch (error: any) {
-    console.error("Upload Error:", error);
-    throw new Error(`Failed to process "${file.name}": ${error.message}`);
-  }
+const uploadFile = async (file: File, path: string, onProgress?: (progress: number) => void): Promise<string> => {
+  const storageRef = ref(storage, `${path}/${Date.now()}_${file.name}`);
+  
+  return new Promise((resolve, reject) => {
+    const uploadTask = uploadBytesResumable(storageRef, file);
+    
+    uploadTask.on(
+      'state_changed',
+      (snapshot) => {
+        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+        if (onProgress) onProgress(progress);
+      },
+      (error) => {
+        console.error("Upload Error:", error);
+        reject(new Error(`Failed to upload "${file.name}": ${error.message}`));
+      },
+      async () => {
+        const url = await getDownloadURL(uploadTask.snapshot.ref);
+        resolve(url);
+      }
+    );
+  });
 };
 
 const fileDataCache = new Map<string, { data: string; mimeType: string }>();
 
-const fetchFileData = async (url: string): Promise<{ data: string; mimeType: string }> => {
+const fetchFileData = async (url: string, retries: number = 2): Promise<{ data: string; mimeType: string }> => {
   if (fileDataCache.has(url)) return fileDataCache.get(url)!;
 
-  if (url.startsWith('data:')) {
-    const parts = url.split(",");
-    const mimePart = url.split(":")[1]?.split(";")[0];
-    const res = { data: parts[1], mimeType: mimePart };
-    fileDataCache.set(url, res);
-    return res;
-  }
-  
-  const response = await fetch(url);
-  const blob = await response.blob();
-  
-  const result: { data: string; mimeType: string } = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64String = (reader.result as string).split(",")[1];
-      resolve({ data: base64String, mimeType: blob.type });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
+  try {
+    // 0. Check Native Storage (Absolute User Ownership)
+    const nativeConfigJson = localStorage.getItem("grademaster_native_config");
+    if (nativeConfigJson) {
+      try {
+        const config = JSON.parse(nativeConfigJson);
+        if (config.enabled && config.folderName) {
+           // We need to re-verify permission or handle it via a persistent handle if possible
+           // For now, if we have a match in the local IDB, we use it, but this is where 
+           // we'd check the native FS if we had a persistent handle.
+           // Since handles are not easily serializable to strings, we rely on the 
+           // session-based handle stored in the App state below.
+        }
+      } catch {}
+    }
 
-  fileDataCache.set(url, result);
-  return result;
+    // 1. Check Local Cache First (IndexedDB)
+    try {
+      const cachedBlob = await getFileBlob(url);
+      if (cachedBlob) {
+        console.log("Loading from local cache:", url);
+        const result: { data: string; mimeType: string } = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64String = (reader.result as string).split(",")[1];
+            resolve({ data: base64String, mimeType: cachedBlob.type });
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(cachedBlob);
+        });
+        fileDataCache.set(url, result);
+        return result;
+      }
+    } catch (cacheErr) {
+      console.warn("Local cache access error:", cacheErr);
+    }
+
+    if (url.startsWith('data:')) {
+      const parts = url.split(",");
+      const mimePart = url.split(":")[1]?.split(";")[0];
+      const res = { data: parts[1], mimeType: mimePart };
+      fileDataCache.set(url, res);
+      return res;
+    }
+    
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    const blob = await response.blob();
+    
+    const result: { data: string; mimeType: string } = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64String = (reader.result as string).split(",")[1];
+        resolve({ data: base64String, mimeType: blob.type });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+
+    fileDataCache.set(url, result);
+    return result;
+  } catch (error) {
+    if (retries > 0) {
+      console.warn(`Fetch failed for ${url}, retrying... (${retries} left)`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return fetchFileData(url, retries - 1);
+    }
+    throw error;
+  }
 };
 
 // --- Components ---
@@ -278,15 +317,8 @@ const SidebarItem = React.memo(({
 // --- Main App ---
 
 export default function App() {
-  const [user, setUser] = useState<any | null>({ uid: 'local_user', displayName: 'Local Admin' });
-  const signInWithGoogle = () => {
-    setUser({ uid: 'local_user', displayName: 'Local Admin' });
-  };
-
-  const logout = () => {
-    setUser(null);
-  };
-  const [loading, setLoading] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
   const [activeFeature, setActiveFeature] = useState<AppFeature>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(window.innerWidth >= 1024);
   
@@ -330,8 +362,15 @@ export default function App() {
   const [isManagingStudents, setIsManagingStudents] = useState<string | null>(null); // examId
 
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isBulkExporting, setIsBulkExporting] = useState(false);
+  const [deleteModal, setDeleteModal] = useState<{ 
+    isOpen: boolean; 
+    type: 'exam' | 'submission'; 
+    id: string | string[]; 
+    title: string 
+  }>({ isOpen: false, type: 'exam', id: '', title: '' });
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [exportProgress, setExportProgress] = useState(0);
   const [currentExportingSubmission, setCurrentExportingSubmission] = useState<Submission | null>(null);
@@ -377,6 +416,44 @@ export default function App() {
 
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [nativeFolderHandle, setNativeFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [isNativeStorageEnabled, setIsNativeStorageEnabled] = useState(false);
+  const [isLocalCacheEnabled, setIsLocalCacheEnabled] = useState<boolean | null>(() => {
+    const saved = localStorage.getItem("grademaster_local_cache");
+    return saved !== null ? saved === "true" : null;
+  });
+
+  const [browserPermissions, setBrowserPermissions] = useState<{
+    camera: PermissionState | 'not-supported' | 'unknown';
+    storage: 'native-active' | 'inactive';
+  }>({
+    camera: 'unknown',
+    storage: 'inactive'
+  });
+
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    return localStorage.getItem("grademaster_welcome_complete") !== "true";
+  });
+
+  useEffect(() => {
+    // Check initial permissions
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: 'camera' as any }).then(status => {
+        setBrowserPermissions(prev => ({ ...prev, camera: status.state }));
+        status.onchange = () => {
+          setBrowserPermissions(prev => ({ ...prev, camera: status.state }));
+        };
+      }).catch(() => {
+        setBrowserPermissions(prev => ({ ...prev, camera: 'not-supported' }));
+      });
+    }
+
+    const nativeEnabled = localStorage.getItem("grademaster_native_enabled") === "true";
+    if (nativeEnabled) {
+      setBrowserPermissions(prev => ({ ...prev, storage: 'native-active' }));
+      setIsNativeStorageEnabled(true);
+    }
+  }, []);
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -401,45 +478,158 @@ export default function App() {
       initialLoader.style.opacity = '0';
       setTimeout(() => initialLoader.remove(), 500);
     }
+
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      console.log("Auth state changed:", u ? `User: ${u.uid}` : "No user");
+      
+      // If we are in guest mode, don't let Firebase auth override it automatically
+      // unless we specifically want to switch.
+      const isGuest = localStorage.getItem("grademaster_is_guest") === "true";
+      if (isGuest) {
+        const guestUser = {
+          uid: "guest_session",
+          displayName: "Guest Educator",
+          email: "guest@grademaster.local",
+          photoURL: null,
+          isAnonymous: true
+        };
+        setUser(guestUser as any);
+        setLoading(false);
+        return;
+      }
+
+      setUser(u);
+      setLoading(false);
+      if (u) {
+        testConnection().catch(e => console.error("Test connection failed:", e));
+      }
+    });
+
+    // Handle guest mode explicitly on mount as well to ensure data loading
+    const isGuest = localStorage.getItem("grademaster_is_guest") === "true";
+    if (isGuest) {
+      const localExamsRaw = JSON.parse(localStorage.getItem("grademaster_exams") || "[]");
+      const localSubmissionsRaw = JSON.parse(localStorage.getItem("grademaster_submissions") || "[]");
+      
+      const refreshUrls = async () => {
+        const enrichedExams = await Promise.all(localExamsRaw.map(async (ex: any) => {
+          try {
+            const qpUrl = ex.questionPaperUrl.startsWith("blob:") || ex.questionPaperUrl.startsWith("local_") ? await getFileUrl(ex.id + "_qp") : ex.questionPaperUrl;
+            const msUrl = ex.markingSchemeUrl.startsWith("blob:") || ex.markingSchemeUrl.startsWith("local_") ? await getFileUrl(ex.id + "_ms") : ex.markingSchemeUrl;
+            return { ...ex, questionPaperUrl: qpUrl, markingSchemeUrl: msUrl };
+          } catch (e) {
+            return ex;
+          }
+        }));
+
+        const enrichedSubmissions = await Promise.all(localSubmissionsRaw.map(async (sub: any) => {
+          try {
+            const bookletUrl = sub.bookletUrl.startsWith("blob:") || sub.bookletUrl.startsWith("local_") ? await getFileUrl(sub.id + "_booklet") : sub.bookletUrl;
+            return { ...sub, bookletUrl };
+          } catch (e) {
+            return sub;
+          }
+        }));
+
+        setExams(enrichedExams);
+        setSubmissions(enrichedSubmissions);
+      };
+
+      refreshUrls();
+    }
+
+    // Safety timeout: if auth hasn't initialized in 8 seconds, force show login screen
+    const timeoutId = setTimeout(() => {
+      setLoading(prev => {
+        if (prev) {
+          console.warn("Auth initialization timed out, showing login screen anyway.");
+          return false;
+        }
+        return prev;
+      });
+    }, 8000);
+
+    return () => {
+      unsubscribe();
+      clearTimeout(timeoutId);
+    };
   }, []);
 
   useEffect(() => {
-    if (!user) return;
-    const fetchExams = async () => {
-      try {
-        const data = await api.getExams();
-        setExams(data);
-      } catch (err) {
-        console.error("Exams Fetch Error:", err);
-        setError("Failed to sync exams.");
-      }
-    };
-    fetchExams();
-    const inv = setInterval(fetchExams, 5000);
-    return () => clearInterval(inv);
+    if (!user || user.uid === "guest_session") return;
+    const q = query(collection(db, "exams"), where("uid", "==", user.uid));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setExams(snapshot.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
+        } as Exam;
+      }));
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, "exams");
+    });
+    return unsubscribe;
   }, [user]);
 
   useEffect(() => {
-    if (!user) return;
-    const fetchSubmissions = async () => {
-      try {
-        // Fetch submissions for all exams to keep the local state updated
-        // For efficiency, we just fetch for selectedExamId if it exists
-        if (selectedExamId) {
-          const data = await api.getSubmissions(selectedExamId);
-          setSubmissions(prev => {
-            const otherSubs = prev.filter(s => s.examId !== selectedExamId);
-            return [...otherSubs, ...data];
-          });
-        }
-      } catch (err) {
-        console.error("Submissions Fetch Error:", err);
+    if (!user || user.uid === "guest_session") return;
+    const q = query(collection(db, "submissions"), where("uid", "==", user.uid));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setSubmissions(snapshot.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
+        } as Submission;
+      }));
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, "submissions");
+    });
+    return unsubscribe;
+  }, [user]);
+
+  const handleLogout = async () => {
+    if (user?.uid === "guest_session") {
+      setUser(null);
+      localStorage.removeItem("grademaster_is_guest");
+      localStorage.removeItem("grademaster_exams");
+      localStorage.removeItem("grademaster_submissions");
+      clearAllFiles();
+    } else {
+      logout();
+    }
+  };
+
+  const handleEnableNativeStorage = async () => {
+    if (!isNativeStorageSupported()) {
+      showToast("Browser does not support Native File System API.", "error");
+      return;
+    }
+
+    if (isRunningInIframe()) {
+      showToast("In-app preview restricts file access. Please open the app in a new tab to activate Local Vault.", "info");
+      return;
+    }
+
+    try {
+      const handle = await requestNativeFolder();
+      if (handle) {
+        setNativeFolderHandle(handle);
+        setIsNativeStorageEnabled(true);
+        localStorage.setItem("grademaster_native_enabled", "true");
+        showToast("Native Storage Connected!", "success");
       }
-    };
-    fetchSubmissions();
-    const inv = setInterval(fetchSubmissions, 5000);
-    return () => clearInterval(inv);
-  }, [user, selectedExamId]);
+    } catch (err: any) {
+      if (err?.name === 'SecurityError' || (err?.message && err.message.includes('sub frames'))) {
+         showToast("Access Restricted: Please open the app in a new tab.", "error");
+      } else {
+         showToast("Failed to connect folder.", "error");
+      }
+    }
+  };
 
   const handleCreateExam = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -461,56 +651,118 @@ export default function App() {
       return;
     }
 
-    // 10MB limit as requested
-    const MAX_FILE_SIZE = 10 * 1024 * 1024; 
+    // Increased limits for "Universal Acceptance"
+    const MAX_FILE_SIZE = 100 * 1024 * 1024; 
     if (newExamQP.size > MAX_FILE_SIZE || newExamMS.size > MAX_FILE_SIZE) {
-      showToast("Files are too large. Each file must be under 10MB.", "error");
+      showToast("Files are too large. Each file must be under 100MB.", "error");
       return;
     }
 
     setIsUploading(true);
+    setIsSubmitting(true);
     setUploadProgress(0);
-    setUploadStatus("Preparing files...");
+    setUploadStatus("Initializing...");
     
     try {
-      setUploadStatus("Compressing files...");
-      const [compressedQP, compressedMS, qpMeta, msMeta] = await Promise.all([
-        compressFile(newExamQP),
-        compressFile(newExamMS),
+      // 1. Instant Local Storage & Metadata Extraction
+      setUploadStatus("Optimizing Local Storage...");
+      const [qpMeta, msMeta] = await Promise.all([
         getPdfMetadata(newExamQP),
         getPdfMetadata(newExamMS)
       ]);
 
-      setUploadStatus("Uploading...");
-      const [qpUrl, msUrl] = await Promise.all([
-        uploadFile(compressedQP, `exams/${user.uid}/qp`),
-        uploadFile(compressedMS, `exams/${user.uid}/ms`)
+      // Generate local fallback IDs
+      const localQpKey = `local_qp_${Date.now()}`;
+      const localMsKey = `local_ms_${Date.now()}`;
+
+      // Save to IndexedDB (Instant)
+      await Promise.all([
+        storeFile(localQpKey, newExamQP),
+        storeFile(localMsKey, newExamMS)
       ]);
+
+      // Save to Native Folder if authorized (True User ownership)
+      if (isNativeStorageEnabled && nativeFolderHandle) {
+        try {
+          const hasPermission = await verifyPermission(nativeFolderHandle);
+          if (hasPermission) {
+            await Promise.all([
+              saveFileToNative(nativeFolderHandle, `Exam_${Date.now()}_QP_${newExamQP.name}`, newExamQP),
+              saveFileToNative(nativeFolderHandle, `Exam_${Date.now()}_MS_${newExamMS.name}`, newExamMS)
+            ]);
+          }
+        } catch (e) {
+          console.warn("Native Save Failed:", e);
+        }
+      }
+
+      setUploadStatus("Finalizing...");
       
-      setUploadStatus("Finalizing exam...");
-      setUploadProgress(100);
-      
-      const result = await api.createExam({
+      const examData = {
+        uid: user.uid,
         title: newExamTitle,
-        questionPaperUrl: qpUrl,
-        markingSchemeUrl: msUrl,
-      });
+        questionPaperUrl: localQpKey, // Temporary local key
+        markingSchemeUrl: localMsKey, // Temporary local key
+        studentList: newExamStudentList.split('\n').map(s => s.trim()).filter(s => s !== ""),
+        qpPageCount: qpMeta?.pageCount || 0,
+        msPageCount: msMeta?.pageCount || 0,
+        syncStatus: (user.uid === "guest_session" ? "ready" : "syncing") as any,
+      };
+
+      let newExamId = "";
+      if (user.uid === "guest_session") {
+        newExamId = "local_" + Math.random().toString(36).substring(2, 9);
+        const newExam = { id: newExamId, ...examData, createdAt: new Date().toISOString() };
+        setExams(prev => {
+          const updated = [...prev, newExam];
+          localStorage.setItem("grademaster_exams", JSON.stringify(updated));
+          return updated;
+        });
+      } else {
+        const docRef = await createExam(examData as any);
+        newExamId = docRef.id;
+
+        // Background Upload Flow
+        (async () => {
+          try {
+            console.log("Background upload starting for:", newExamId);
+            const [finalQpUrl, finalMsUrl] = await Promise.all([
+              uploadFile(newExamQP, `exams/${user.uid}/qp`),
+              uploadFile(newExamMS, `exams/${user.uid}/ms`)
+            ]);
+
+            // Map final URL to local file in IDB for instant reload
+            await Promise.all([
+              storeFile(finalQpUrl, newExamQP),
+              storeFile(finalMsUrl, newExamMS)
+            ]);
+
+            await updateExam(newExamId, {
+              questionPaperUrl: finalQpUrl,
+              markingSchemeUrl: finalMsUrl,
+              syncStatus: "ready"
+            });
+            console.log("Sync complete for exam:", newExamId);
+          } catch (e) {
+            console.error("Sync failed for exam:", newExamId, e);
+          }
+        })();
+      }
       
       setIsCreatingExam(false);
       setNewExamTitle("");
       setNewExamQP(null);
       setNewExamMS(null);
       setNewExamStudentList("");
+      showToast(user.uid === "guest_session" ? "Exam Created!" : "Exam Created and Syncing...", "success");
     } catch (error: any) {
       console.error("Create Exam Error:", error);
       let message = "Failed to create exam. ";
       
       if (error.message?.includes("corrupted") || error.message?.includes("not a valid image")) {
-        message += "One of the files appears to be corrupted or is not a valid image.";
+        message += "One of the files appears to be corrupted or is not a valid PDF.";
       } else if (error.message?.includes("quota") || error.message?.includes("limit")) {
-        message += "This might be due to storage limits or the 1MB document size limit in Firestore.";
-      } else if (error.message?.includes("permission") || error.message?.includes("denied")) {
-        message += "Permission denied. Please make sure you are logged in.";
+        message += "This might be due to storage limits or document size limits.";
       } else {
         try {
           const errData = JSON.parse(error.message);
@@ -522,6 +774,7 @@ export default function App() {
       showToast(message, "error");
     } finally {
       setIsUploading(false);
+      setIsSubmitting(false);
       setUploadProgress(0);
       setUploadStatus("");
     }
@@ -556,101 +809,110 @@ export default function App() {
 
   const handleAddSubmission = async (e: React.FormEvent) => {
     e.preventDefault();
-    let studentName = newStudentName;
     if (!selectedExamId || !newBooklet) {
       showToast("Please provide a booklet.", "error");
       return;
     }
 
     const bookletError = await validateFile(newBooklet, ['*/*']);
-    if (bookletError) {
-      showToast(bookletError, "error");
-      return;
-    }
+    if (bookletError) { showToast(bookletError, "error"); return; }
 
-    const MAX_FILE_SIZE = 15 * 1024 * 1000; 
+    const MAX_FILE_SIZE = 100 * 1024 * 1024; 
     if (newBooklet.size > MAX_FILE_SIZE) {
-      showToast("Booklet file is too large. It must be under 15MB.", "error");
+      showToast("Booklet file is too large (max 100MB).", "error");
       return;
     }
 
     setIsUploading(true);
     setUploadProgress(0);
-    setUploadStatus("Preparing booklet...");
+    setUploadStatus("Initializing...");
     
     try {
-      // 1. Kick off compression, AI extraction, and metadata extraction concurrently
-      const [compressedBooklet, bookletDataForAI, bookletMeta] = await Promise.all([
-        compressFile(newBooklet),
-        (!studentName) ? getFirstPageAsImage(newBooklet) : Promise.resolve(null),
-        getPdfMetadata(newBooklet)
+      // 1. Instant Processing
+      setUploadStatus("Processing Local Data...");
+      const localBookletKey = `local_sub_${Date.now()}`;
+      
+      const [bookletInfo] = await Promise.all([
+        getPdfInfo(newBooklet, !newStudentName),
+        storeFile(localBookletKey, newBooklet),
+        (isNativeStorageEnabled && nativeFolderHandle) ? 
+          verifyPermission(nativeFolderHandle).then(has => has && saveFileToNative(nativeFolderHandle, `Submission_${Date.now()}_${newBooklet.name}`, newBooklet)) : 
+          Promise.resolve()
       ]);
 
-      // 2. Start upload immediately after compression, don't wait for AI
-      setUploadStatus("Uploading...");
-      const uploadPromise = uploadFile(compressedBooklet, `submissions/${user!.uid}/${selectedExamId}`);
+      const bookletDataForAI = bookletInfo?.firstPage || null;
+      let finalName = newStudentName || newBooklet.name.replace(/\.[^/.]+$/, "").replace(/[_]/g, " ");
 
-      // 3. Extract student name if needed
-      let extractedName = studentName;
-      if (!extractedName && bookletDataForAI) {
-        setUploadStatus("Scanning...");
-        const aiPromise = extractStudentDetails(bookletDataForAI).catch(err => {
-          console.warn("AI extraction failed:", err);
-          return { studentName: null };
-        });
-        
-        // Use filename as fallback while AI is working
-        const tempName = newBooklet.name.replace(/\.[^/.]+$/, "").replace(/_/g, " ").replace(/-/g, " ");
-        
-        // Wait for both upload and AI (or use fallback)
-        const [bookletUrl, aiResult] = await Promise.all([uploadPromise, aiPromise]);
-        extractedName = aiResult.studentName || tempName;
+      // 2. Optimistic Entry
+      const submissionData = {
+        uid: user!.uid,
+        examId: selectedExamId,
+        studentName: finalName,
+        bookletUrl: localBookletKey,
+        status: "pending" as const,
+        pageCount: bookletInfo?.pageCount || 0,
+        createdAt: serverTimestamp(),
+        syncStatus: user!.uid === "guest_session" ? "ready" : "syncing"
+      };
 
-        setUploadStatus("Finishing...");
-        await api.createSubmission({
-          uid: user!.uid,
-          examId: selectedExamId,
-          studentName: extractedName,
-          bookletUrl: bookletUrl,
-          status: "pending",
-          pageCount: bookletMeta?.pageCount
+      let subId = "";
+      if (user!.uid === "guest_session") {
+        subId = "local_sub_" + Math.random().toString(36).substring(2, 9);
+        const newSub = { id: subId, ...submissionData, createdAt: new Date().toISOString() } as any;
+        setSubmissions(prev => {
+          const updated = [...prev, newSub];
+          localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+          return updated;
         });
       } else {
-        // If name already provided, just wait for upload
-        const bookletUrl = await uploadPromise;
-        setUploadStatus("Finishing...");
-        await api.createSubmission({
-          uid: user!.uid,
-          examId: selectedExamId,
-          studentName: extractedName || (newBooklet.name.replace(/\.[^/.]+$/, "")),
-          bookletUrl: bookletUrl,
-          status: "pending",
-          pageCount: bookletMeta?.pageCount
-        });
+        const docRef = await createSubmission(submissionData as any);
+        subId = docRef.id;
+
+        // Background Upload & Sync
+        (async () => {
+          try {
+            console.log("Background upload starting for submission:", subId);
+            const finalUrl = await uploadFile(newBooklet, `submissions/${user!.uid}/${selectedExamId}`);
+            
+            // Sync to local IDB for instant access
+            await storeFile(finalUrl, newBooklet);
+
+            await updateSubmission(subId, {
+              bookletUrl: finalUrl,
+              syncStatus: "ready"
+            });
+            console.log("Background sync complete for submission:", subId);
+          } catch (e) {
+            console.error("Background sync failed for submission:", subId, e);
+          }
+        })();
+      }
+
+      // 3. Name Refinement (Optional, Background)
+      if (!newStudentName && bookletDataForAI) {
+        (async () => {
+          try {
+            const aiDetails = await extractStudentDetails(bookletDataForAI);
+            if (aiDetails.studentName) {
+              if (user!.uid === "guest_session") {
+                setSubmissions(prev => prev.map(s => s.id === subId ? { ...s, studentName: aiDetails.studentName } : s));
+              } else {
+                await updateSubmission(subId, { studentName: aiDetails.studentName });
+              }
+            }
+          } catch (e) { console.warn("AI Name Extraction Failed", e); }
+        })();
       }
 
       setIsAddingSubmission(false);
       setNewStudentName("");
       setNewBooklet(null);
+      showToast(user!.uid === "guest_session" ? "Submission Added!" : "Submission Added & Syncing...", "success");
     } catch (error: any) {
       console.error("Add Submission Error:", error);
-      let message = "Failed to add submission. ";
-      
-      if (error.message?.includes("quota")) {
-        message += "Storage quota exceeded.";
-      } else {
-        // Try to parse JSON error if it came from handleFirestoreError
-        try {
-          const errData = JSON.parse(error.message);
-          message += errData.error || "An unexpected error occurred.";
-        } catch (e) {
-          message += error.message || "An unexpected error occurred.";
-        }
-      }
-      showToast(message, "error");
+      showToast(error.message || "Failed to add submission.", "error");
     } finally {
       setIsUploading(false);
-      setUploadProgress(0);
       setUploadStatus("");
     }
   };
@@ -676,50 +938,81 @@ export default function App() {
           return;
         }
 
-        const MAX_FILE_SIZE = 25 * 1024 * 1024; // Increased for better UX, compression handles it
+        const MAX_FILE_SIZE = 150 * 1024 * 1024; // High limit to ensure everything is accepted
         if (file.size > MAX_FILE_SIZE) {
-          console.warn(`Skipping ${file.name}: File is too large. Max 25MB.`);
+          console.warn(`Skipping ${file.name}: File is too large. Max 150MB.`);
           failCount++;
           return;
         }
 
-        // Use filename immediately for maximum speed
+        // Faster local processing
         const tempStudentName = file.name.replace(/\.[^/.]+$/, "").replace(/_/g, " ").replace(/-/g, " ");
-        
-        // Fast compression and metadata extraction
-        const [compressedFile, pdfMeta] = await Promise.all([
-          compressFile(file),
-          getPdfMetadata(file)
+        const localKey = `local_bulk_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+        // Parallelize IDB save and metadata check
+        const [pdfMeta, nativeRes] = await Promise.all([
+          getPdfMetadata(file),
+          storeFile(localKey, file),
+          (isNativeStorageEnabled && nativeFolderHandle) ? 
+            verifyPermission(nativeFolderHandle).then(has => has && saveFileToNative(nativeFolderHandle, `Bulk_${Date.now()}_${file.name}`, file)) : 
+            Promise.resolve()
         ]);
         
-        const bookletUrl = await uploadFile(compressedFile, `submissions/${user.uid}/${selectedExamId}`);
-
-        const newSubmission = await api.createSubmission({
+        const submissionData = {
           uid: user.uid,
           examId: selectedExamId,
           studentName: tempStudentName,
-          bookletUrl: bookletUrl,
-          status: "pending",
-          pageCount: pdfMeta?.pageCount
-        });
-        
-        if (!newSubmission) throw new Error("Failed to create submission");
+          bookletUrl: localKey,
+          status: "pending" as const,
+          pageCount: pdfMeta?.pageCount || 0,
+          createdAt: serverTimestamp(),
+          syncStatus: user.uid === "guest_session" ? "ready" : "syncing"
+        };
 
-        successCount++;
+        let currentSubId = "";
+        if (user.uid === "guest_session") {
+          currentSubId = "local_sub_" + Math.random().toString(36).substring(2, 9);
+          const newSub = { id: currentSubId, ...submissionData, createdAt: new Date().toISOString() } as any;
+          setSubmissions(prev => {
+            const updated = [...prev, newSub];
+            localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+            return updated;
+          });
+          successCount++;
+        } else {
+          const newDoc = await createSubmission(submissionData as any);
+          currentSubId = newDoc.id;
+          successCount++;
 
-        // QUEUE AI Background Scanning - doesn't block the upload loop
-        if (useAIForBulkNames) {
-          // We don't await this so the loop continues instantly
+          // Background Cloud Sync for each file
           (async () => {
             try {
-              const bookletDataForAI = await getFirstPageAsImage(file);
-              const details = await extractStudentDetails(bookletDataForAI);
-              if (details.studentName && details.studentName !== "Unknown") {
-                await api.updateSubmission(newSubmission.id, { studentName: details.studentName });
-              }
-            } catch (err) {
-              console.warn(`Background AI scan failed for ${file.name}`);
+              const finalUrl = await uploadFile(file, `submissions/${user.uid}/${selectedExamId}`);
+              await storeFile(finalUrl, file); // Map final URL to local file
+              await updateSubmission(currentSubId, {
+                bookletUrl: finalUrl,
+                syncStatus: "ready"
+              });
+            } catch (syncErr) {
+              console.error("Bulk sync error for sub:", currentSubId, syncErr);
             }
+          })();
+        }
+
+        // Background AI scan for names if requested
+        if (useAIForBulkNames) {
+          (async () => {
+            try {
+              const firstPage = await getFirstPageAsImage(file);
+              const details = await extractStudentDetails(firstPage);
+              if (details.studentName) {
+                if (user.uid === "guest_session") {
+                  setSubmissions(prev => prev.map(s => s.id === currentSubId ? { ...s, studentName: details.studentName } : s));
+                } else {
+                  await updateSubmission(currentSubId, { studentName: details.studentName });
+                }
+              }
+            } catch (err) { /* silent fail for background scan */ }
           })();
         }
       };
@@ -764,6 +1057,7 @@ export default function App() {
   };
 
   const handleEvaluate = async (submission: Submission, silent: boolean = false) => {
+    // We can evaluate offline if we have the simulation ready
     const exam = exams.find(e => e.id === submission.examId);
     if (!exam) return;
 
@@ -779,12 +1073,22 @@ export default function App() {
       console.log("Starting AI evaluation...");
       const result = await evaluateExam(qp, ms, booklet);
       
-      await api.updateSubmission(submission.id!, {
-        status: "evaluated",
+      const updateData = {
+        status: "evaluated" as const,
         totalMarks: result.totalMarks,
         maxMarks: result.maxMarks,
         evaluationData: { questions: result.questions }
-      });
+      };
+
+      if (user?.uid === "guest_session") {
+        setSubmissions(prev => {
+          const updated = prev.map(s => s.id === submission.id ? { ...s, ...updateData } : s);
+          localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+          return updated;
+        });
+      } else {
+        await updateSubmission(submission.id!, updateData);
+      }
       
       if (!silent) setEvaluationResult(result);
     } catch (error: any) {
@@ -826,6 +1130,10 @@ export default function App() {
   };
 
   const handleBulkEvaluate = async () => {
+    if (!isOnline) {
+      showToast("Cannot start bulk evaluation while offline.", "error");
+      return;
+    }
     const pending = submissions.filter(s => s.examId === selectedExamId && s.status === "pending");
     if (pending.length === 0) {
       showToast("No pending submissions to evaluate.", "info");
@@ -857,12 +1165,22 @@ export default function App() {
           console.log(`Starting AI evaluation for ${submission.studentName}...`);
           const result = await evaluateExam(qp, ms, booklet);
           
-          await api.updateSubmission(submission.id!, {
-            status: "evaluated",
+          const updateData = {
+            status: "evaluated" as const,
             totalMarks: result.totalMarks,
             maxMarks: result.maxMarks,
             evaluationData: { questions: result.questions }
-          });
+          };
+
+          if (user?.uid === "guest_session") {
+            setSubmissions(prev => {
+              const updated = prev.map(s => s.id === submission.id ? { ...s, ...updateData } : s);
+              localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+              return updated;
+            });
+          } else {
+            await updateSubmission(submission.id!, updateData);
+          }
           
           success++;
         } catch (err: any) {
@@ -883,39 +1201,110 @@ export default function App() {
     e.preventDefault();
     if (!editingExam || !editingExam.id) return;
     
-    setLoading(true);
+    setIsSubmitting(true);
     try {
-      await api.updateExam(editingExam.id, {
+      const updateData = {
         title: editingExam.title,
         studentList: editingExam.studentList
-      });
+      };
+
+      if (user?.uid === "guest_session") {
+        setExams(prev => {
+          const updated = prev.map(ex => ex.id === editingExam.id ? { ...ex, ...updateData } : ex);
+          localStorage.setItem("grademaster_exams", JSON.stringify(updated));
+          return updated;
+        });
+      } else {
+        await updateExam(editingExam.id, updateData);
+      }
       setEditingExam(null);
+      showToast("Exam updated successfully.", "success");
     } catch (error: any) {
       console.error("Update Exam Error:", error);
       showToast("Failed to update exam.", "error");
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
     }
   };
 
-  const handleDeleteExam = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this exam? This will also delete all associated submissions.")) return;
+  const handleDeleteExam = async (id: string, title?: string) => {
+    if (!deleteModal.isOpen && !id) return;
     
-    setLoading(true);
+    // If called directly without modal, show modal first
+    if (!deleteModal.isOpen) {
+      setDeleteModal({ isOpen: true, type: 'exam', id, title: title || "this exam" });
+      return;
+    }
+
+    setIsSubmitting(true);
+    setDeleteModal(prev => ({ ...prev, isOpen: false }));
+    
     try {
       // Delete associated submissions first
       const associatedSubmissions = submissions.filter(s => s.examId === id);
-      for (const sub of associatedSubmissions) {
-        if (sub.id) await api.deleteSubmission(sub.id);
+      
+      if (user?.uid === "guest_session") {
+        const remainingSubmissions = submissions.filter(s => s.examId !== id);
+        setSubmissions(remainingSubmissions);
+        localStorage.setItem("grademaster_submissions", JSON.stringify(remainingSubmissions));
+
+        const remainingExams = exams.filter(ex => ex.id !== id);
+        setExams(remainingExams);
+        localStorage.setItem("grademaster_exams", JSON.stringify(remainingExams));
+
+        // Cleanup local files
+        deleteFile(id + "_qp");
+        deleteFile(id + "_ms");
+        associatedSubmissions.forEach(s => deleteFile(s.id + "_booklet"));
+      } else {
+        // Delete associated submissions in parallel
+        await Promise.all(associatedSubmissions.map(sub => sub.id ? deleteSubmission(sub.id) : Promise.resolve()));
+        await deleteExam(id);
       }
       
-      await api.deleteExam(id);
       if (selectedExamId === id) setSelectedExamId(null);
+      showToast("Exam and all associated submissions deleted successfully.", "success");
     } catch (error: any) {
       console.error("Delete Exam Error:", error);
       showToast("Failed to delete exam.", "error");
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteSubmission = async (id: string | string[], name?: string) => {
+    if (!deleteModal.isOpen && (!id || (Array.isArray(id) && id.length === 0))) return;
+
+    if (!deleteModal.isOpen) {
+      const isBulk = Array.isArray(id);
+      setDeleteModal({ 
+        isOpen: true, 
+        type: 'submission', 
+        id, 
+        title: isBulk ? `${id.length} selected submissions` : (name || "this submission") 
+      });
+      return;
+    }
+
+    setIsSubmitting(true);
+    setDeleteModal(prev => ({ ...prev, isOpen: false }));
+
+    try {
+      const idsToDelete = Array.isArray(id) ? id : [id];
+      
+      if (user?.uid === "guest_session") {
+        const remainingSubmissions = submissions.filter(s => !idsToDelete.includes(s.id!));
+        setSubmissions(remainingSubmissions);
+        localStorage.setItem("grademaster_submissions", JSON.stringify(remainingSubmissions));
+        idsToDelete.forEach(sid => deleteFile(sid + "_booklet"));
+      } else {
+        await Promise.all(idsToDelete.map(sid => deleteSubmission(sid)));
+      }
+      showToast(`${idsToDelete.length} ${idsToDelete.length === 1 ? 'submission' : 'submissions'} deleted`, "success");
+    } catch (error) {
+      showToast("Failed to delete submission(s)", "error");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -1029,17 +1418,26 @@ export default function App() {
   };
 
   const handleBulkStatusUpdate = async (ids: string[], status: "pending" | "evaluated") => {
-    setLoading(true);
+    setIsSubmitting(true);
     let success = 0;
     try {
-      await Promise.all(ids.map(id => api.updateSubmission(id, { status })));
-      success = ids.length;
+      if (user?.uid === "guest_session") {
+        setSubmissions(prev => {
+          const updated = prev.map(s => ids.includes(s.id!) ? { ...s, status } : s);
+          localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+          return updated;
+        });
+        success = ids.length;
+      } else {
+        await Promise.all(ids.map(id => updateSubmission(id, { status })));
+        success = ids.length;
+      }
       showToast(`Successfully updated ${success} submissions to ${status}.`, "success");
     } catch (err: any) {
       console.error("Bulk Status Update Error:", err);
       showToast("Failed to update some submissions.", "error");
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -1163,7 +1561,7 @@ export default function App() {
               GradeMaster
             </h3>
             <div className="flex items-center justify-center gap-3">
-              <p className="text-slate-500 text-sm font-bold uppercase tracking-widest">Initializing Intelligence</p>
+              <p className="text-slate-500 text-sm font-bold uppercase tracking-widest">Logging In</p>
               <div className="flex gap-1">
                 <motion.span 
                   animate={{ opacity: [0, 1, 0] }} 
@@ -1214,7 +1612,7 @@ export default function App() {
             <h1 className="text-5xl font-display font-black text-white mb-4 tracking-tighter italic">GradeMaster</h1>
             <div className="flex items-center justify-center gap-3">
                <div className="h-px w-8 bg-slate-800" />
-               <p className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.4em]">Autonomous Grading Core</p>
+               <p className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.4em]">Grading Platform</p>
                <div className="h-px w-8 bg-slate-800" />
             </div>
           </div>
@@ -1224,7 +1622,7 @@ export default function App() {
             
             <div className="space-y-2 text-center">
               <p className="text-slate-400 font-medium leading-relaxed">
-                Connect your educator credentials to access the semantic evaluation pipeline.
+                Log in to access your student booklets and grading.
               </p>
             </div>
 
@@ -1236,7 +1634,7 @@ export default function App() {
               >
                 <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <p className="uppercase tracking-widest text-[10px]">Security Alert</p>
+                  <p className="uppercase tracking-widest text-[10px]">Error</p>
                   <p className="font-medium opacity-80">{authError}</p>
                 </div>
               </motion.div>
@@ -1265,7 +1663,7 @@ export default function App() {
                 }
               }}
               disabled={isSigningIn}
-              className="w-full h-20 bg-white text-black font-black uppercase tracking-[0.2em] text-[12px] rounded-[28px] flex items-center justify-center gap-4 hover:bg-slate-100 transition-all active:scale-[0.98] shadow-2xl shadow-blue-500/5 disabled:opacity-50 disabled:cursor-not-allowed group"
+              className="w-full h-20 bg-white text-black font-black uppercase tracking-[0.2em] text-[12px] rounded-[28px] flex items-center justify-center gap-4 hover:bg-slate-100 transition-all active:scale-[0.98] shadow-2xl shadow-blue-500/5 disabled:opacity-50 disabled:cursor-not-allowed group mb-4"
             >
               {isSigningIn ? (
                 <Loader2 className="w-6 h-6 animate-spin" />
@@ -1274,18 +1672,37 @@ export default function App() {
                   <div className="w-8 h-8 bg-slate-950 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
                     <LogIn className="w-4 h-4 text-white" />
                   </div>
-                  <span>Authenticate via Google</span>
+                  <span>Log in with Google</span>
                 </>
               )}
+            </button>
+
+            <button
+              onClick={() => {
+                // Set a mock user for guest mode
+                const guestUser = {
+                  uid: "guest_" + Math.random().toString(36).substring(2, 9),
+                  displayName: "Guest Educator",
+                  email: "guest@grademaster.local",
+                  photoURL: null,
+                  isAnonymous: true
+                };
+                setUser(guestUser as any);
+                setLoading(false);
+                localStorage.setItem("grademaster_is_guest", "true");
+              }}
+              className="w-full py-4 border-2 border-slate-800 text-slate-400 font-bold uppercase tracking-widest text-[10px] rounded-2xl hover:bg-slate-800 hover:text-white transition-all active:scale-[0.98]"
+            >
+              Continue as Guest (Offline Mode)
             </button>
             
             <div className="pt-4 flex flex-col items-center gap-4">
                <div className="flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-blue-500/50" />
-                  <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">Secure TLS 1.3 Active</p>
+                  <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">Secure Connection</p>
                </div>
                <p className="text-[10px] text-center text-slate-700 font-mono uppercase tracking-tighter max-w-[200px]">
-                 Enterprise encryption for academic integrity and data sovereignty.
+                 Secure login for academic use.
                </p>
             </div>
           </div>
@@ -1296,7 +1713,7 @@ export default function App() {
             transition={{ delay: 1 }}
             className="mt-12 text-center text-slate-600 font-mono text-[10px] uppercase tracking-[0.2em]"
           >
-            © 2024 GradeMaster • Semantic Logic V2
+            © 2024 GradeMaster
           </motion.p>
         </motion.div>
       </div>
@@ -1308,15 +1725,20 @@ export default function App() {
   return (
     <div className="h-screen w-full flex bg-slate-950 overflow-hidden font-sans text-slate-200">
       <AnimatePresence>
-        {!isOnline && (
+        {(!isOnline || user.uid === "guest_session") && (
           <motion.div
             initial={{ y: -50, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: -50, opacity: 0 }}
-            className="fixed top-0 left-0 right-0 z-[200] bg-orange-600 text-white text-[10px] font-black uppercase tracking-[0.2em] py-2 text-center flex items-center justify-center gap-2"
+            className={cn(
+              "fixed top-0 left-0 right-0 z-[200] text-white text-[10px] font-black uppercase tracking-[0.2em] py-2 text-center flex items-center justify-center gap-2",
+              user.uid === "guest_session" ? "bg-blue-600" : "bg-orange-600"
+            )}
           >
             <AlertCircle className="w-3 h-3" />
-            Offline Mode: AI Grading & Uploads Suspended. Viewing local data.
+            {user.uid === "guest_session" 
+              ? "Guest Mode: Data saved locally. AI Grading Simulated if offline." 
+              : "Offline Mode: AI Grading & Uploads Suspended. Viewing cached data."}
           </motion.div>
         )}
       </AnimatePresence>
@@ -1351,7 +1773,7 @@ export default function App() {
                 </div>
                 <div>
                   <h1 className="text-xl font-display font-black tracking-tight text-white italic leading-tight">GradeMaster</h1>
-                  <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">Control Panel v2.1</p>
+                  <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">Admin Panel</p>
                 </div>
               </div>
               <button 
@@ -1365,11 +1787,12 @@ export default function App() {
 
             <nav className="flex-1 px-4 space-y-1.5 overflow-y-auto custom-scrollbar">
               {[
-                { id: 'dashboard', icon: LayoutDashboard, label: 'Control Center', desc: 'Main operations link' },
-                { id: 'exams', icon: BookOpen, label: 'Exam Papers', desc: 'Masters and schemes' },
+                { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', desc: 'Overview of grading' },
+                { id: 'exams', icon: BookOpen, label: 'Exams', desc: 'Questions and schemes' },
                 { id: 'submissions', icon: FileCheck, label: 'Submissions', desc: 'Student booklets' },
-                { id: 'students', icon: Users, label: 'Roster Hub', desc: 'Manage identifiers' },
-                { id: 'about', icon: Info, label: 'Technical Logs', desc: 'System information' },
+                { id: 'students', icon: Users, label: 'Roster', desc: 'Manage students' },
+                { id: 'settings', icon: Settings, label: 'Settings', desc: 'Storage & Account' },
+                { id: 'about', icon: Info, label: 'Help', desc: 'System information' },
               ].map((item) => (
                 <button
                   key={item.id}
@@ -1420,17 +1843,17 @@ export default function App() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-black truncate text-white uppercase tracking-tight">{user.displayName}</p>
-                  <p className="text-[10px] font-mono text-slate-500 truncate uppercase mt-0.5 tracking-tighter">Authorized Admin</p>
+                  <p className="text-[10px] font-mono text-slate-500 truncate uppercase mt-0.5 tracking-tighter">Educator</p>
                 </div>
               </div>
               
               <button 
-                onClick={logout}
+                onClick={handleLogout}
                 className="w-full py-4 px-6 text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-2xl transition-all duration-300 flex items-center justify-between group"
               >
                 <div className="flex items-center gap-3">
                   <LogOut className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
-                  <span className="text-xs font-black uppercase tracking-widest">Terminate Session</span>
+                  <span className="text-xs font-black uppercase tracking-widest">Logout</span>
                 </div>
                 <div className="w-8 h-8 rounded-lg bg-slate-800/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                    <ChevronRight className="w-4 h-4" />
@@ -1485,7 +1908,12 @@ export default function App() {
           <div className="flex items-center gap-2">
             <div className="hidden md:flex flex-col items-end mr-4">
                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">{new Date().toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
-               <span className="text-[10px] font-mono text-emerald-400 uppercase tracking-widest leading-none mt-1">System Nominal</span>
+               <span className={cn(
+                 "text-[10px] font-mono uppercase tracking-widest leading-none mt-1",
+                 isOnline ? "text-emerald-400" : "text-rose-400"
+               )}>
+                 Status: {isOnline ? "Online" : "Offline"}
+               </span>
             </div>
             
             {error && (
@@ -1495,7 +1923,7 @@ export default function App() {
                 className="px-4 py-2 bg-rose-500/10 border border-rose-500/20 rounded-xl flex items-center gap-2 text-rose-400 text-xs font-black uppercase tracking-tight"
               >
                 <Cpu className="w-4 h-4 animate-pulse" />
-                CORE_ERR
+                Error
                 <button onClick={() => setError(null)} className="ml-2 hover:text-white p-1 rounded-md hover:bg-rose-500/20 transition-colors">
                   <X className="w-3 h-3" />
                 </button>
@@ -1528,106 +1956,128 @@ export default function App() {
                     const tid = showToast("Configuring Evaluation Environment", "loading");
                     try {
                       const samplePdf = "data:application/pdf;base64,JVBERi0xLjcKJeLjz9MKMSAwIG9iagogIDw8IC9UeXBlIC9DYXRhbG9nIC9QYWdlcyAyIDAgUiA+PgplbmRvYmoKMiAwIG9iagogIDw8IC9UeXBlIC9QYWdlcyAvQ291bnQgMSAvS2lkcyBbIDMgMCBSIF0gPj4KZW5kb2JqCjMgMCBvYmoKICA8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1Jlc291cmNlcyA0IDAgUiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmogIDw8ID4+IGVuZG9iago1IDAgb2JqCiAgPDwgL0xlbmd0aCA0NCA+PiBzdHJlYW0KICAwIDAgMCAxIEsgYmYgQlQKICAvRjEgMjQgVGYgMTAwIDcwMCBUZCAoR3JhZGVNYXN0ZXIgRGVtb3EpIFRqIEVUCiAgZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyMzggMDAwMDAgbiAKMDAwMDAwMDI1OCAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM1MgolJUVPRgo=";
-                      const exam = await api.createExam({
+                      const examData = {
+                        uid: user.uid,
                         title: "Quantum Physics: Wave-Particle Duality Master",
                         questionPaperUrl: samplePdf,
                         markingSchemeUrl: samplePdf,
                         studentList: ["John Doe", "Jane Smith", "Xavier Chen"]
-                      });
+                      };
+
+                      let exam;
+                      if (user.uid === "guest_session") {
+                        const id = "local_" + Math.random().toString(36).substring(2, 9);
+                        exam = { id, ...examData, createdAt: new Date().toISOString() };
+                        setExams(prev => {
+                          const updated = [...prev, exam];
+                          localStorage.setItem("grademaster_exams", JSON.stringify(updated));
+                          return updated;
+                        });
+                      } else {
+                        exam = await createExam(examData);
+                      }
 
                       if (exam && exam.id) {
-                        // Submission 1: Excellent Perfect
-                        await api.createSubmission({
-                          examId: exam.id,
-                          studentName: "John Doe",
-                          bookletUrl: samplePdf,
-                          status: 'evaluated',
-                          totalMarks: 48,
-                          maxMarks: 50,
-                          evaluationData: {
-                            summary: "Candidate John Doe demonstrated exceptional mastery of Schrödinger's Wave Equation and the Heisenberg Uncertainty Principle. The derivation of the wave function for a particle in a 1D box was mathematically perfect. Minor points were deducted for lack of units in the final kinetic energy calculation.",
-                            questions: [
-                              {
-                                questionNumber: "1",
-                                transcription: "By applying the time-independent Schrödinger equation, we find that the wave function must be continuous at the boundaries...",
-                                marksAwarded: 10,
-                                maxMarks: 10,
-                                feedback: "Exceptional mathematical rigor. Boundary condition application is precise.",
-                                pageNumber: 1
-                              },
-                              {
-                                questionNumber: "2",
-                                transcription: "The probability density is given by the square of the amplitude |ψ|²...",
-                                marksAwarded: 10,
-                                maxMarks: 10,
-                                feedback: "Correct interpretation of the Born rule.",
-                                pageNumber: 1
-                              }
-                            ]
+                        const demoSubs = [
+                          {
+                            studentName: "John Doe",
+                            totalMarks: 48,
+                            maxMarks: 50,
+                            evaluationData: {
+                              summary: "Candidate John Doe demonstrated exceptional mastery of Schrödinger's Wave Equation and the Heisenberg Uncertainty Principle. The derivation of the wave function for a particle in a 1D box was mathematically perfect. Minor points were deducted for lack of units in the final kinetic energy calculation.",
+                              questions: [
+                                {
+                                  questionNumber: "1",
+                                  transcription: "By applying the time-independent Schrödinger equation, we find that the wave function must be continuous at the boundaries...",
+                                  marksAwarded: 10,
+                                  maxMarks: 10,
+                                  feedback: "Exceptional mathematical rigor. Boundary condition application is precise.",
+                                  pageNumber: 1
+                                },
+                                {
+                                  questionNumber: "2",
+                                  transcription: "The probability density is given by the square of the amplitude |ψ|²...",
+                                  marksAwarded: 10,
+                                  maxMarks: 10,
+                                  feedback: "Correct interpretation of the Born rule.",
+                                  pageNumber: 1
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            studentName: "Jane Smith",
+                            totalMarks: 22,
+                            maxMarks: 50,
+                            evaluationData: {
+                              summary: "Jane Smith showed basic understanding but failed to complete the secondary and tertiary sections of the paper. Section 2 was left entirely blank. The concepts that were attempted showed moderate understanding of the photoelectric effect.",
+                              questions: [
+                                {
+                                  questionNumber: "1",
+                                  transcription: "Energy is quantized in discrete packets called photons. E = hf...",
+                                  marksAwarded: 12,
+                                  maxMarks: 15,
+                                  feedback: "Good conceptual grasp of photon energy. Failed to derive the work function relationship.",
+                                  pageNumber: 1
+                                },
+                                {
+                                  questionNumber: "2",
+                                  transcription: "[NO DATA DETECTED - SECTION LEFT BLANK]",
+                                  marksAwarded: 0,
+                                  maxMarks: 15,
+                                  feedback: "Question ignored by student.",
+                                  pageNumber: 1
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            studentName: "Xavier Chen",
+                            totalMarks: 35,
+                            maxMarks: 50,
+                            evaluationData: {
+                              summary: "Xavier has a good grasp of concepts but struggles with algebraic manipulation. Several mathematical errors led to incorrect final values despite correct initial formulas.",
+                              questions: [
+                                {
+                                  questionNumber: "1",
+                                  transcription: "λ = h/p. For an electron moving at 0.1c...",
+                                  marksAwarded: 15,
+                                  maxMarks: 20,
+                                  feedback: "Formula is correct. Numerical error in calculating momentum leads to incorrect wavelength.",
+                                  pageNumber: 1
+                                },
+                                {
+                                  questionNumber: "2",
+                                  transcription: "The Compton shift is given by Δλ = (h/mc)(1-cosθ)...",
+                                  marksAwarded: 20,
+                                  maxMarks: 20,
+                                  feedback: "Perfect derivation and calculation.",
+                                  pageNumber: 1
+                                }
+                              ]
+                            }
                           }
-                        });
+                        ];
 
-                        // Submission 2: Partial / Incomplete
-                        await api.createSubmission({
-                          examId: exam.id,
-                          studentName: "Jane Smith",
-                          bookletUrl: samplePdf,
-                          status: 'evaluated',
-                          totalMarks: 22,
-                          maxMarks: 50,
-                          evaluationData: {
-                            summary: "Jane Smith showed basic understanding but failed to complete the secondary and tertiary sections of the paper. Section 2 was left entirely blank. The concepts that were attempted showed moderate understanding of the photoelectric effect.",
-                            questions: [
-                              {
-                                questionNumber: "1",
-                                transcription: "Energy is quantized in discrete packets called photons. E = hf...",
-                                marksAwarded: 12,
-                                maxMarks: 15,
-                                feedback: "Good conceptual grasp of photon energy. Failed to derive the work function relationship.",
-                                pageNumber: 1
-                              },
-                              {
-                                questionNumber: "2",
-                                transcription: "[NO DATA DETECTED - SECTION LEFT BLANK]",
-                                marksAwarded: 0,
-                                maxMarks: 15,
-                                feedback: "Question ignored by student.",
-                                pageNumber: 1
-                              }
-                            ]
+                        for (const sub of demoSubs) {
+                          const subData = {
+                            uid: user.uid,
+                            examId: exam.id,
+                            bookletUrl: samplePdf,
+                            status: 'evaluated' as const,
+                            ...sub
+                          };
+                          if (user.uid === "guest_session") {
+                            const sid = "local_sub_" + Math.random().toString(36).substring(2, 9);
+                            setSubmissions(prev => {
+                              const updated = [...prev, { id: sid, ...subData, createdAt: new Date().toISOString() }];
+                              localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+                              return updated;
+                            });
+                          } else {
+                            await createSubmission(subData);
                           }
-                        });
-
-                        // Submission 3: Mixed Errors
-                        await api.createSubmission({
-                          examId: exam.id,
-                          studentName: "Xavier Chen",
-                          bookletUrl: samplePdf,
-                          status: 'evaluated',
-                          totalMarks: 35,
-                          maxMarks: 50,
-                          evaluationData: {
-                            summary: "Xavier has a good grasp of concepts but struggles with algebraic manipulation. Several mathematical errors led to incorrect final values despite correct initial formulas.",
-                            questions: [
-                              {
-                                questionNumber: "1",
-                                transcription: "λ = h/p. For an electron moving at 0.1c...",
-                                marksAwarded: 15,
-                                maxMarks: 20,
-                                feedback: "Formula is correct. Numerical error in calculating momentum leads to incorrect wavelength.",
-                                pageNumber: 1
-                              },
-                              {
-                                questionNumber: "2",
-                                transcription: "The Compton shift is given by Δλ = (h/mc)(1-cosθ)...",
-                                marksAwarded: 20,
-                                maxMarks: 20,
-                                feedback: "Perfect derivation and calculation.",
-                                pageNumber: 1
-                              }
-                            ]
-                          }
-                        });
+                        }
                       }
                       removeToast(tid);
                       showToast("Physics Evaluation Master Reflected.", "success");
@@ -1665,13 +2115,13 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {dashboardStats.recentExams.map(exam => (
+                  {sortedExams.map(exam => (
                     <ExamItem 
                       key={exam.id} 
                       exam={exam} 
                       onSelect={() => { setSelectedExamId(exam.id!); setActiveFeature("submissions"); }}
                       onEdit={() => setEditingExam(exam)}
-                      onDelete={() => handleDeleteExam(exam.id!)}
+                      onDelete={() => handleDeleteExam(exam.id!, exam.title)}
                       onManageStudents={() => {
                         setIsManagingStudents(exam.id!);
                         setNewExamStudentList(exam.studentList?.join('\n') || "");
@@ -1763,11 +2213,14 @@ export default function App() {
 
                             <button 
                               type="submit"
-                              disabled={loading}
+                              disabled={isSubmitting}
                               className="w-full h-20 bg-blue-600 text-white font-black uppercase tracking-[0.2em] text-[12px] rounded-[32px] hover:bg-blue-500 transition-all shadow-[0_20px_50px_rgba(37,99,235,0.2)] disabled:opacity-50 disabled:bg-slate-800 disabled:text-slate-500 flex items-center justify-center gap-4 active:scale-[0.98] ring-1 ring-white/10"
                             >
-                              {loading ? (
-                                <Loader2 className="w-6 h-6 animate-spin" />
+                              {isSubmitting ? (
+                                <div className="flex items-center gap-3">
+                                  <Loader2 className="w-6 h-6 animate-spin" />
+                                  <span className="animate-pulse">{uploadStatus || "Committing..."}</span>
+                                </div>
                               ) : (
                                 <>
                                   <Plus className="w-6 h-6" />
@@ -1822,10 +2275,10 @@ export default function App() {
                         </div>
                         <button 
                           type="submit"
-                          disabled={loading}
+                          disabled={isSubmitting}
                           className="w-full h-20 bg-blue-600 text-white font-black uppercase tracking-[0.2em] text-[12px] rounded-[32px] hover:bg-blue-500 transition-all shadow-[0_20px_50px_rgba(37,99,235,0.2)] active:scale-[0.98] ring-1 ring-white/10"
                         >
-                          {loading ? <Loader2 className="w-6 h-6 animate-spin mx-auto" /> : "Commit Parameter Changes"}
+                          {isSubmitting ? <Loader2 className="w-6 h-6 animate-spin mx-auto" /> : "Commit Parameter Changes"}
                         </button>
                       </form>
                     </motion.div>
@@ -1841,17 +2294,24 @@ export default function App() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
               >
-                <SubmissionsView 
-                  exam={exams.find(e => e.id === selectedExamId)}
-                  submissions={filteredSubmissions}
-                  onNavigate={setActiveFeature}
-                  onBulkEvaluate={handleBulkEvaluate}
-                  onSingleEvaluate={(sub) => { setSelectedSubmissionId(sub.id!); setActiveFeature("evaluate"); }}
-                  onAddSubmission={() => setIsAddingSubmission(true)}
-                  onBulkAddSubmissions={() => setIsBulkAddingSubmissions(true)}
-                  onExportCSV={() => exportGradesCSV()}
-                  onDeleteSubmission={api.deleteSubmission}
-                  onBulkStatusUpdate={handleBulkStatusUpdate}
+                  <SubmissionsView 
+                    exam={exams.find(e => e.id === selectedExamId)}
+                    submissions={filteredSubmissions}
+                    onNavigate={setActiveFeature}
+                    onBulkEvaluate={handleBulkEvaluate}
+                    onSingleEvaluate={(sub) => { setSelectedSubmissionId(sub.id!); setActiveFeature("evaluate"); }}
+                    onAddSubmission={() => setIsAddingSubmission(true)}
+                    onBulkAddSubmissions={() => setIsBulkAddingSubmissions(true)}
+                    onExportCSV={() => exportGradesCSV()}
+                    onDeleteSubmission={(id) => {
+                      if (Array.isArray(id)) {
+                        handleDeleteSubmission(id);
+                      } else {
+                        const sub = submissions.find(s => s.id === id);
+                        handleDeleteSubmission(id, sub?.studentName);
+                      }
+                    }}
+                    onBulkStatusUpdate={handleBulkStatusUpdate}
                   isEvaluating={isEvaluating}
                   isOnline={isOnline}
                 />
@@ -1924,13 +2384,27 @@ export default function App() {
                           file={newBooklet} 
                           accept={{ 'image/*': [], 'application/pdf': [], 'application/octet-stream': [], '*': [] }}
                         />
-                        <button 
-                          type="submit"
-                          disabled={isUploading}
-                          className="w-full py-5 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 disabled:opacity-50"
-                        >
-                          {isUploading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : "Add Submission"}
-                        </button>
+                        {newBooklet && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                          >
+                            <button 
+                              type="submit"
+                              disabled={isUploading}
+                              className="w-full py-5 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 disabled:opacity-50 flex items-center justify-center gap-3"
+                            >
+                              {isUploading ? (
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                              ) : (
+                                <>
+                                  <FileCheck className="w-5 h-5" />
+                                  <span>Submit Submission</span>
+                                </>
+                              )}
+                            </button>
+                          </motion.div>
+                        )}
                       </form>
                     </motion.div>
                   </div>
@@ -1954,7 +2428,7 @@ export default function App() {
                           label="Select Files" 
                           onUpload={setBulkFiles} 
                           files={bulkFiles} 
-                          accept={{ 'image/*': [], 'application/pdf': [], 'application/zip': [], 'application/octet-stream': [], '*': [] }}
+                          accept={{ '*/*': [] }}
                         />
                         <div className="flex items-center gap-3 p-4 rounded-2xl bg-slate-800 border border-slate-700">
                           <input 
@@ -1973,13 +2447,27 @@ export default function App() {
                             <strong>Tip:</strong> {useAIForBulkNames ? "AI will scan the first page of each document for student details." : "Filenames will be used as student names. You can upload multiple PDFs/Images directly or a single ZIP file containing them."}
                           </p>
                         </div>
-                        <button 
-                          type="submit"
-                          disabled={isUploading || bulkFiles.length === 0}
-                          className="w-full py-5 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 disabled:opacity-50"
-                        >
-                          {isUploading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : "Start Bulk Upload"}
-                        </button>
+                        {bulkFiles.length > 0 && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                          >
+                            <button 
+                              type="submit"
+                              disabled={isUploading}
+                              className="w-full py-5 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 disabled:opacity-50 flex items-center justify-center gap-3"
+                            >
+                              {isUploading ? (
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                              ) : (
+                                <>
+                                  <Upload className="w-5 h-5" />
+                                  <span>Submit All Files ({bulkFiles.length})</span>
+                                </>
+                              )}
+                            </button>
+                          </motion.div>
+                        )}
                       </form>
                     </motion.div>
                   </div>
@@ -2105,22 +2593,32 @@ export default function App() {
                             Cancel
                           </button>
                           <button 
+                            disabled={isSubmitting}
                             onClick={async () => {
                               const list = newExamStudentList.split('\n').map(s => s.trim()).filter(s => s !== "");
-                              setLoading(true);
+                              setIsSubmitting(true);
                               try {
-                                await api.updateExam(isManagingStudents, { studentList: list });
+                                if (user?.uid === "guest_session" && isManagingStudents) {
+                                  setExams(prev => {
+                                    const updated = prev.map(ex => ex.id === isManagingStudents ? { ...ex, studentList: list } : ex);
+                                    localStorage.setItem("grademaster_exams", JSON.stringify(updated));
+                                    return updated;
+                                  });
+                                } else if (isManagingStudents) {
+                                  await updateExam(isManagingStudents, { studentList: list });
+                                }
                                 setIsManagingStudents(null);
                                 setNewExamStudentList("");
+                                showToast("Roster updated successfully", "success");
                               } catch (e) {
-                                showToast("Failed to update student list", "error");
+                                showToast("Failed to update roster", "error");
                               } finally {
-                                setLoading(false);
+                                setIsSubmitting(false);
                               }
                             }}
-                            className="flex-1 py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all"
+                            className="flex-1 py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all flex items-center justify-center gap-2"
                           >
-                            Save Roster
+                            {isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : "Save Roster"}
                           </button>
                         </div>
                       </div>
@@ -2149,6 +2647,28 @@ export default function App() {
                     </div>
                   </div>
                   <div className="flex gap-2 sm:gap-3 w-full lg:w-auto">
+                    {(() => {
+                      const exam = exams.find(e => e.id === currentSubmission.examId);
+                      if (!exam) return null;
+                      return (
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => window.open(exam.questionPaperUrl, '_blank')}
+                            className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-2xl text-blue-400 hover:bg-blue-500 hover:text-white transition-all shadow-inner"
+                            title="View Question Paper"
+                          >
+                            <FileText className="w-5 h-5" />
+                          </button>
+                          <button 
+                            onClick={() => window.open(exam.markingSchemeUrl, '_blank')}
+                            className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-400 hover:bg-emerald-500 hover:text-white transition-all shadow-inner"
+                            title="View Marking Scheme"
+                          >
+                            <CheckCircle className="w-5 h-5" />
+                          </button>
+                        </div>
+                      );
+                    })()}
                     {currentSubmission.status === "evaluated" && (
                       <div className="flex gap-2">
                         <button 
@@ -2216,17 +2736,17 @@ export default function App() {
                              <div className="w-1.5 h-12 bg-blue-600 rounded-full" />
                              <div>
                                 <h2 className="text-4xl sm:text-5xl font-display font-black text-white italic tracking-tighter leading-none">{currentSubmission.studentName}</h2>
-                                <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-3">Semantic Analysis Report</p>
+                                <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-3">Grading Report</p>
                              </div>
                           </div>
                           <div className="flex items-center gap-4">
                             <div className="px-4 py-1.5 bg-blue-600/10 border border-blue-500/20 rounded-xl flex items-center gap-2">
-                               <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-widest">Assessment Track</span>
+                               <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-widest">Exam</span>
                                <span className="text-sm font-bold text-white italic">{exams.find(e => e.id === currentSubmission.examId)?.title}</span>
                             </div>
                             <div className="px-4 py-1.5 bg-slate-800/50 border border-slate-700/50 rounded-xl flex items-center gap-2">
-                               <Cpu className="w-3.5 h-3.5 text-slate-500" />
-                               <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">Model: Gemini-1.5-Pro</span>
+                               <CheckCircle className="w-3.5 h-3.5 text-slate-500" />
+                               <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">Graded by AI</span>
                             </div>
                           </div>
                         </div>
@@ -2259,7 +2779,7 @@ export default function App() {
                         <div className="flex items-center justify-between">
                           <h3 className="text-2xl font-display font-black text-white italic flex items-center gap-3">
                             <FileCheck className="w-6 h-6 text-blue-500" />
-                            Atomic Feedback Nodes
+                            Question Feedback
                           </h3>
                         </div>
                         <div className="grid grid-cols-1 gap-6">
@@ -2269,8 +2789,8 @@ export default function App() {
                                 <div className="flex items-center gap-5">
                                   <div className="w-16 h-16 bg-slate-950 rounded-[22px] border border-slate-800 flex items-center justify-center text-blue-500 font-black text-lg shadow-inner group-hover/card:scale-110 group-hover/card:rotate-3 transition-all duration-500">Q{q.questionNumber}</div>
                                   <div>
-                                    <p className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest mb-1">Spatial Mapping</p>
-                                    <p className="text-sm font-bold text-white font-display italic">Module Frame {q.pageNumber}</p>
+                                    <p className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest mb-1">Location</p>
+                                    <p className="text-sm font-bold text-white font-display italic">Page {q.pageNumber}</p>
                                   </div>
                                 </div>
                                 <div className="self-start sm:self-auto px-6 py-3 bg-slate-950 rounded-2xl text-base font-black text-blue-400 border border-slate-800/80 flex items-center gap-3 shadow-inner">
@@ -2284,7 +2804,7 @@ export default function App() {
                                 <div className="space-y-4">
                                   <div className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 flex items-center gap-3">
                                     <div className="w-2 h-2 rounded-full bg-blue-600" />
-                                    OCR Transcription Node
+                                    Transcription
                                   </div>
                                   <div className="p-6 rounded-[28px] bg-slate-950/40 border border-slate-800/50 min-h-[100px] shadow-inner group-hover/card:bg-slate-950/60 transition-colors">
                                     <p className="text-sm text-slate-400 italic leading-relaxed font-medium">"{q.transcription}"</p>
@@ -2293,7 +2813,7 @@ export default function App() {
                                 <div>
                                   <div className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 mb-4 flex items-center gap-3">
                                     <div className="w-2 h-2 rounded-full bg-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.5)]" />
-                                    Cognitive Correction Protocol
+                                    AI Feedback
                                   </div>
                                   <div className="p-6 rounded-[28px] bg-purple-500/5 border border-purple-500/10 min-h-[100px] shadow-inner group-hover/card:bg-purple-500/10 transition-colors">
                                     <p className="text-sm text-purple-100/80 leading-relaxed font-medium">{q.feedback}</p>
@@ -2321,7 +2841,7 @@ export default function App() {
                       <AlertCircle className="w-8 h-8 sm:w-10 sm:h-10 text-slate-600" />
                     </div>
                     <h2 className="text-xl sm:text-2xl font-bold text-white mb-2">Ready for Evaluation</h2>
-                    <p className="text-sm text-slate-500 max-w-xs mx-auto mb-8">This student's booklet is uploaded and ready for the AI to perform the semantic grading process.</p>
+                    <p className="text-sm text-slate-500 max-w-xs mx-auto mb-8">This student's booklet is uploaded and ready for the AI to perform the grading process.</p>
                     <button 
                        onClick={() => handleEvaluate(currentSubmission)}
                        className="px-8 py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-500/20 active:scale-95"
@@ -2330,6 +2850,169 @@ export default function App() {
                     </button>
                   </div>
                 )}
+              </motion.div>
+            )}
+
+            {activeFeature === "settings" && (
+              <motion.div 
+                key="settings"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="max-w-4xl mx-auto"
+              >
+                <div className="mb-10">
+                  <h1 className="text-3xl font-bold text-white mb-2">System Settings</h1>
+                  <p className="text-slate-500">Configure your local storage and account preferences.</p>
+                </div>
+
+                <div className="space-y-6">
+                  <div>
+                    <h4 className="text-xs font-mono text-slate-500 uppercase tracking-widest mb-4">Device Authorization Status</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-10">
+                        <div className="p-6 bg-slate-950/40 rounded-[32px] border border-slate-800/50 flex flex-col gap-6 group hover:border-emerald-500/20 transition-all hover:bg-slate-950/60 shadow-xl">
+                           <div className="flex items-center justify-between">
+                              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${browserPermissions.camera === 'granted' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-800 text-slate-500 group-hover:scale-110'}`}>
+                                <Camera className="w-6 h-6" />
+                              </div>
+                              <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest border ${browserPermissions.camera === 'granted' ? 'bg-emerald-500/5 text-emerald-500 border-emerald-500/20' : 'bg-slate-800/50 text-slate-500 border-slate-700/50'}`}>
+                                {browserPermissions.camera === 'granted' ? 'Authorized' : 'Restricted'}
+                              </div>
+                           </div>
+                           <div>
+                              <p className="text-white font-bold text-lg tracking-tight mb-1">Optical Scanner</p>
+                              <p className="text-[10px] text-slate-500 font-mono uppercase tracking-[0.2em]">Used for real-time booklet capture</p>
+                           </div>
+                           <div className="pt-2 border-t border-slate-800/50">
+                              {browserPermissions.camera !== 'granted' ? (
+                                <button 
+                                  onClick={async () => {
+                                    try {
+                                      await navigator.mediaDevices.getUserMedia({ video: true });
+                                      showToast("Permission Updated", "success");
+                                    } catch {
+                                      showToast("Access Denied", "error");
+                                    }
+                                  }}
+                                  className="text-[10px] font-black uppercase tracking-widest text-blue-500 hover:text-blue-400 flex items-center gap-2 group/btn"
+                                >
+                                  Grant Authorization <ChevronRight className="w-3 h-3 group-hover/btn:translate-x-1 transition-transform" />
+                                </button>
+                              ) : (
+                                <p className="text-[10px] font-bold text-emerald-500/70 uppercase tracking-widest flex items-center gap-2">
+                                  <CheckCircle className="w-3 h-3" /> System Ready
+                                </p>
+                              )}
+                           </div>
+                        </div>
+
+                        <div className="p-6 bg-slate-950/40 rounded-[32px] border border-slate-800/50 flex flex-col gap-6 group hover:border-blue-500/20 transition-all hover:bg-slate-950/60 shadow-xl">
+                           <div className="flex items-center justify-between">
+                              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${isNativeStorageEnabled ? 'bg-blue-500/10 text-blue-500' : 'bg-slate-800 text-slate-500 group-hover:scale-110'}`}>
+                                <Folders className="w-6 h-6" />
+                              </div>
+                              <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest border ${isNativeStorageEnabled ? 'bg-blue-500/5 text-blue-500 border-blue-500/20' : 'bg-slate-800/50 text-slate-500 border-slate-700/50'}`}>
+                                {isNativeStorageEnabled ? 'Vault Active' : 'Disconnected'}
+                              </div>
+                           </div>
+                           <div>
+                              <div className="flex items-center gap-2 mb-1">
+                                <p className="text-white font-bold text-lg tracking-tight">Local Storage Vault</p>
+                                {isRunningInIframe() && (
+                                  <span className="text-[8px] bg-slate-800 text-slate-500 px-2 py-0.5 rounded-full uppercase tracking-widest font-black ring-1 ring-slate-700">Preview Restricted</span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-slate-500 font-mono uppercase tracking-[0.2em]">Native directory synchronization</p>
+                           </div>
+                           <div className="pt-2 border-t border-slate-800/50">
+                              {!isNativeStorageEnabled ? (
+                                <button 
+                                  onClick={handleEnableNativeStorage}
+                                  className="text-[10px] font-black uppercase tracking-widest text-blue-500 hover:text-blue-400 flex items-center gap-2 group/btn"
+                                >
+                                  Link Local Folder <ChevronRight className="w-3 h-3 group-hover/btn:translate-x-1 transition-transform" />
+                                </button>
+                              ) : (
+                                <p className="text-[10px] font-bold text-blue-500/70 uppercase tracking-widest flex items-center gap-2">
+                                  <CheckCircle className="w-3 h-3" /> Sync Connected
+                                </p>
+                              )}
+                           </div>
+                        </div>
+                    </div>
+
+                    <h4 className="text-xs font-mono text-slate-500 uppercase tracking-widest mb-4">Performance Optimizations</h4>
+                    <div className="space-y-4">
+                       <div className="bg-slate-950/50 p-6 rounded-3xl border border-slate-800/50 flex items-center justify-between group hover:border-blue-500/30 transition-all">
+                          <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-500 group-hover:scale-110 transition-transform">
+                              <ShieldCheck className="w-6 h-6" />
+                            </div>
+                            <div className="flex-1">
+                               <p className="font-bold text-white tracking-tight">Native File System Sync</p>
+                               <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Stores files in a folder on your computer</p>
+                            </div>
+                          </div>
+                          {!isNativeStorageEnabled ? (
+                            <button 
+                              onClick={handleEnableNativeStorage}
+                              className="px-6 py-3 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all active:scale-95"
+                            >
+                              Activate
+                            </button>
+                          ) : (
+                            <div className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 text-emerald-500 rounded-xl text-[10px] font-black uppercase tracking-widest border border-emerald-500/20">
+                               <CheckCircle className="w-4 h-4" /> Active
+                            </div>
+                          )}
+                       </div>
+
+                       <div className="bg-slate-950/50 p-6 rounded-3xl border border-slate-800/50 flex items-center justify-between group hover:border-blue-500/30 transition-all">
+                          <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-500 group-hover:scale-110 transition-transform">
+                              <Cpu className="w-6 h-6" />
+                            </div>
+                            <div>
+                               <p className="font-bold text-white tracking-tight">Performance Caching (IndexedDB)</p>
+                               <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Uses browser memory for instant results</p>
+                            </div>
+                          </div>
+                          <button 
+                            onClick={() => {
+                               const newState = !isLocalCacheEnabled;
+                               setIsLocalCacheEnabled(newState);
+                               localStorage.setItem("grademaster_local_cache", String(newState));
+                               showToast(newState ? "Performance Cache Enabled" : "Performance Cache Disabled", "info");
+                            }}
+                            className={`w-14 h-8 rounded-full p-1 transition-colors ${isLocalCacheEnabled ? 'bg-blue-500' : 'bg-slate-800'}`}
+                          >
+                             <div className={`w-6 h-6 bg-white rounded-full transition-transform ${isLocalCacheEnabled ? 'translate-x-6' : 'translate-x-0'}`} />
+                          </button>
+                       </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-mono text-slate-500 uppercase tracking-widest mb-4">Account Metadata</h4>
+                    <div className="bg-slate-950/50 p-6 rounded-3xl border border-slate-800/50 flex items-center justify-between">
+                       <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 bg-white/5 rounded-2xl flex items-center justify-center text-slate-400">
+                             <UserIcon className="w-6 h-6" />
+                          </div>
+                          <div>
+                             <p className="font-bold text-white tracking-tight">{user?.displayName || "Professor"}</p>
+                             <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">{user?.email}</p>
+                          </div>
+                       </div>
+                       <button
+                         onClick={handleLogout}
+                         className="px-6 py-3 border border-red-500/30 text-red-500 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-500/10 transition-all font-display italic"
+                       >
+                         Logout Session
+                       </button>
+                    </div>
+                  </div>
+                </div>
               </motion.div>
             )}
 
@@ -2448,6 +3131,187 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Onboarding / Permission Gate */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <div className="fixed inset-0 z-[3000] flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-950/90 backdrop-blur-2xl"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 40 }}
+              className="relative w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-[48px] shadow-[0_50px_100px_rgba(0,0,0,0.9)] overflow-hidden p-8 sm:p-12 technical-border my-auto"
+            >
+               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent" />
+               
+               <div className="flex flex-col items-center mb-8">
+                  <div className="w-16 h-16 bg-blue-600/10 rounded-2xl flex items-center justify-center text-blue-500 mb-6 ring-1 ring-blue-500/20">
+                    <ShieldCheck className="w-8 h-8" />
+                  </div>
+                  <h3 className="text-3xl sm:text-4xl font-display font-black text-white italic text-center tracking-tighter leading-tight">Welcome to GradeMaster</h3>
+                  <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2 text-center">Initialize Your Secure Workspace Before Logging In</p>
+               </div>
+
+               <div className="space-y-4 mb-10">
+                  <div className="p-6 bg-slate-950/50 rounded-[32px] border border-slate-800/50 group hover:border-blue-500/30 transition-all">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-500 shrink-0">
+                        <Folders className="w-6 h-6" />
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <h4 className="text-white font-bold tracking-tight">Local Identity Ownership</h4>
+                          {isRunningInIframe() && (
+                            <span className="text-[8px] bg-slate-800 text-slate-500 px-2 py-0.5 rounded-full uppercase tracking-widest font-black ring-1 ring-slate-700">Preview Restricted</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-500 leading-relaxed italic mb-4">Connect a folder on your computer to store your files locally. This provides instant speed and keeps you in control of your data.</p>
+                        {!isNativeStorageEnabled ? (
+                          <button 
+                            onClick={handleEnableNativeStorage}
+                            className="w-full sm:w-auto px-6 py-3 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all active:scale-95 flex items-center justify-center gap-2"
+                          >
+                            <Plus className="w-4 h-4" /> Connect Local Folder
+                          </button>
+                        ) : (
+                          <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs">
+                            <CheckCircle className="w-4 h-4" /> Folder Connected Successfully
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-6 bg-slate-950/50 rounded-[32px] border border-slate-800/50 group hover:border-purple-500/30 transition-all">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 bg-purple-500/10 rounded-2xl flex items-center justify-center text-purple-500 shrink-0">
+                        <Camera className="w-6 h-6" />
+                      </div>
+                      <div className="flex-1">
+                        <h4 className="text-white font-bold tracking-tight mb-1">Smart Scanning Helper</h4>
+                        <p className="text-xs text-slate-500 leading-relaxed italic mb-4">Enable camera access to scan student booklets directly via the interface. This will be used only for capturing document images.</p>
+                        {browserPermissions.camera !== 'granted' ? (
+                          <button 
+                            onClick={async () => {
+                              try {
+                                await navigator.mediaDevices.getUserMedia({ video: true });
+                                showToast("Camera permission granted", "success");
+                              } catch (e) {
+                                showToast("Camera permission denied or not found", "error");
+                              }
+                            }}
+                            className="w-full sm:w-auto px-6 py-3 bg-purple-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-purple-500 transition-all active:scale-95"
+                          >
+                            Grant Camera Access
+                          </button>
+                        ) : (
+                          <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs">
+                            <CheckCircle className="w-4 h-4" /> Camera Permission Granted
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+               </div>
+
+               <div className="flex flex-col gap-3">
+                 <button
+                   onClick={() => {
+                     setShowOnboarding(false);
+                     localStorage.setItem("grademaster_welcome_complete", "true");
+                     if (!isLocalCacheEnabled) {
+                       setIsLocalCacheEnabled(true);
+                       localStorage.setItem("grademaster_local_cache", "true");
+                     }
+                   }}
+                   className="w-full py-6 rounded-[28px] bg-white text-slate-950 font-black uppercase tracking-[0.2em] text-[12px] hover:bg-slate-200 transition-all shadow-[0_20px_50px_rgba(255,255,255,0.1)] active:scale-[0.98]"
+                 >
+                   Continue to Application
+                 </button>
+                 <button
+                   onClick={() => {
+                     setShowOnboarding(false);
+                     localStorage.setItem("grademaster_welcome_complete", "true");
+                   }}
+                   className="w-full py-2 text-slate-600 hover:text-slate-400 transition-colors font-mono text-[9px] uppercase tracking-[0.4em]"
+                 >
+                   Maybe Later, Continue to Login
+                 </button>
+               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {deleteModal.isOpen && (
+          <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4 sm:p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setDeleteModal(prev => ({ ...prev, isOpen: false }))}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-slate-900 border border-slate-800 rounded-[32px] shadow-2xl overflow-hidden"
+            >
+              <div className="p-8">
+                <div className="w-16 h-16 bg-rose-500/10 rounded-2xl flex items-center justify-center text-rose-500 mb-6 mx-auto">
+                  <AlertTriangle className="w-8 h-8" />
+                </div>
+                
+                <h3 className="text-2xl font-bold text-white text-center mb-2">Delete {deleteModal.type === 'exam' ? 'Exam' : 'Submission'}?</h3>
+                <p className="text-slate-400 text-center mb-8">
+                  Are you sure you want to delete <span className="text-white font-semibold">"{deleteModal.title}"</span>? 
+                  {deleteModal.type === 'exam' && " This will permanently remove all associated student submissions and data."}
+                  This action cannot be undone.
+                </p>
+
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button
+                    onClick={() => setDeleteModal(prev => ({ ...prev, isOpen: false }))}
+                    className="flex-1 px-6 py-4 rounded-2xl bg-slate-800 text-white font-bold hover:bg-slate-700 transition-all border border-slate-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (deleteModal.type === 'exam') {
+                        handleDeleteExam(deleteModal.id as string);
+                      } else {
+                        handleDeleteSubmission(deleteModal.id);
+                      }
+                    }}
+                    className="flex-1 px-6 py-4 rounded-2xl bg-rose-600 text-white font-bold hover:bg-rose-500 transition-all shadow-lg shadow-rose-900/20"
+                  >
+                    Delete Now
+                  </button>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => setDeleteModal(prev => ({ ...prev, isOpen: false }))}
+                className="absolute top-6 right-6 p-2 text-slate-500 hover:text-white transition-colors"
+                type="button"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Toasts Container */}
       <div className="fixed bottom-8 left-0 right-0 z-[1000] pointer-events-none flex flex-col items-center gap-2">
         <AnimatePresence>

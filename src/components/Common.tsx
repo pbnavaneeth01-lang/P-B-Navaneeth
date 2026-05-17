@@ -92,10 +92,10 @@ export const FileUpload = ({ label, onUpload, file, accept }: FileUploadProps) =
               "text-base font-bold transition-colors",
               file ? "text-blue-400" : "text-slate-200 group-hover:text-white"
             )}>
-              {file ? file.name : "Select or Drop Source"}
+              {file ? file.name : "Select File"}
             </p>
             <p className="text-[10px] uppercase font-mono tracking-widest text-slate-500 mt-2">
-              {file ? `${(file.size / 1024 / 1024).toFixed(2)} MB • READY` : "Max capacity 10MB • All formats"}
+              {file ? `${(file.size / 1024 / 1024).toFixed(2)} MB • READY` : "Max capacity 10MB"}
             </p>
           </div>
           {file && (
@@ -103,7 +103,7 @@ export const FileUpload = ({ label, onUpload, file, accept }: FileUploadProps) =
               onClick={(e) => { e.stopPropagation(); onUpload(null); }}
               className="px-6 py-2 bg-rose-500/10 text-rose-400 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-rose-500 hover:text-white transition-all shadow-lg shadow-rose-900/20"
             >
-              Flush Cache / Reset
+              Remove File
             </button>
           )}
         </div>

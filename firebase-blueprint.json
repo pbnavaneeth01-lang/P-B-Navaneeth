@@ -22,11 +22,15 @@
         "title": { "type": "string" },
         "questionPaperUrl": { "type": "string" },
         "markingSchemeUrl": { "type": "string" },
+        "qpPageCount": { "type": "number" },
+        "msPageCount": { "type": "number" },
+        "syncStatus": { "type": "string", "enum": ["ready", "syncing", "error"] },
         "studentList": {
           "type": "array",
           "items": { "type": "string" }
         },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "title", "questionPaperUrl", "markingSchemeUrl", "createdAt"]
     },
@@ -60,8 +64,10 @@
         "studentName": { "type": "string" },
         "bookletUrl": { "type": "string" },
         "status": { "type": "string", "enum": ["pending", "evaluated"] },
+        "syncStatus": { "type": "string", "enum": ["ready", "syncing", "error"] },
         "totalMarks": { "type": "number" },
         "maxMarks": { "type": "number" },
+        "pageCount": { "type": "number" },
         "evaluationData": {
           "type": "object",
           "properties": {
@@ -71,7 +77,8 @@
             }
           }
         },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "examId", "studentName", "bookletUrl", "status", "createdAt"]
     }

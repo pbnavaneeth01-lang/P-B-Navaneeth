@@ -127,8 +127,8 @@ export const BookletAnnotator = React.memo(({ bookletUrl, questions }: BookletAn
           <div className="absolute inset-0 bg-blue-500 blur-xl opacity-20 animate-pulse" />
         </div>
         <div className="text-center space-y-1">
-          <p className="text-white font-bold tracking-tight">Rendering Booklet</p>
-          <p className="text-slate-500 text-xs">AI-Optimized Viewport Rasterization...</p>
+          <p className="text-white font-bold tracking-tight">Loading Booklet</p>
+          <p className="text-slate-500 text-xs">Optimizing View...</p>
         </div>
       </div>
     );
@@ -140,17 +140,17 @@ export const BookletAnnotator = React.memo(({ bookletUrl, questions }: BookletAn
         <div className="space-y-3">
           <div className="flex items-center gap-3">
              <div className="w-1 h-8 bg-blue-600 rounded-full" />
-             <h3 className="text-3xl font-display font-black text-white italic tracking-tighter leading-none">Booklet Master-Sync</h3>
+             <h3 className="text-3xl font-display font-black text-white italic tracking-tighter leading-none">Submission View</h3>
           </div>
-          <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em]">Temporal Frame Ingestion : Page {pages.length}</p>
+          <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em]">Page {pages.length}</p>
         </div>
         <div className="flex items-center gap-4 text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.2em] bg-slate-950/50 backdrop-blur-xl px-5 py-3 rounded-2xl border border-slate-800/60 shadow-xl">
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-emerald-400">Semantic Layer Active</span>
+            <span className="text-emerald-400">AI Active</span>
           </div>
           <div className="w-px h-3 bg-slate-800" />
-          <span>GPU Raster Enabled</span>
+          <span>Optimized View</span>
         </div>
       </div>
       
@@ -166,7 +166,7 @@ export const BookletAnnotator = React.memo(({ bookletUrl, questions }: BookletAn
                 loading="lazy"
               />
               <div className="absolute top-6 left-6 px-4 py-2 bg-slate-900/80 backdrop-blur-md rounded-xl text-[10px] font-mono font-bold text-white border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity">
-                FRAME_ID: {idx + 1}
+                Page: {idx + 1}
               </div>
             </div>
 

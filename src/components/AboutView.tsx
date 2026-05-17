@@ -17,10 +17,10 @@ export const AboutView = React.memo(() => (
         <GraduationCap className="w-12 h-12 text-white" />
       </div>
       <h1 className="text-6xl font-black text-white tracking-tighter">GradeMaster</h1>
-      <p className="text-slate-400 text-xl font-medium max-w-2xl mx-auto">Advanced academic evaluation powered by state-of-the-art vision and language models.</p>
+      <p className="text-slate-400 text-xl font-medium max-w-2xl mx-auto">Advanced academic evaluation powered by AI.</p>
       <div className="flex items-center justify-center gap-4 text-emerald-400 font-bold bg-emerald-400/5 py-2.5 px-8 rounded-full w-max mx-auto border border-emerald-400/10 shadow-lg">
         <ShieldCheck className="w-4 h-4" />
-        GradeMaster v2.2.0
+        GradeMaster v1.0
       </div>
     </div>
 
@@ -52,19 +52,19 @@ export const AboutView = React.memo(() => (
       <section className="space-y-6 pt-6 border-t border-slate-800">
         <div className="flex items-center gap-3 text-emerald-400">
           <ShieldCheck className="w-6 h-6" />
-          <h3 className="text-xl font-bold uppercase tracking-widest text-white italic">Cloud Infrastructure</h3>
+          <h3 className="text-xl font-bold uppercase tracking-widest text-white italic">Security</h3>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="bg-slate-950/50 p-6 rounded-2xl border border-slate-800">
-            <h4 className="text-emerald-400 font-bold mb-2">Infinite Scaling</h4>
+            <h4 className="text-emerald-400 font-bold mb-2">Private & Secure</h4>
             <p className="text-slate-400 text-sm leading-relaxed">
-              Equipped with GradeMaster's 100GB+ Cloud Core, storage constraints are a thing of the past. Manage thousands of detailed booklets across multiple academic years with ease.
+              Your data is stored securely in the cloud. Only you have access to your exams and student submissions.
             </p>
           </div>
           <div className="bg-slate-950/50 p-6 rounded-2xl border border-slate-800">
-            <h4 className="text-blue-400 font-bold mb-2">High-Performance Compute</h4>
+            <h4 className="text-blue-400 font-bold mb-2">Hybrid Performance</h4>
             <p className="text-slate-400 text-sm leading-relaxed">
-              Leveraging regional edge acceleration in asia-south1 for ultra-low latency data synchronization and lightning-fast AI processing.
+              Guest Mode stores files on your device for instant speed. Gmail mode syncs to the cloud but offers <span className="text-white font-bold">Performance Caching</span> to match Guest Mode speed.
             </p>
           </div>
         </div>
