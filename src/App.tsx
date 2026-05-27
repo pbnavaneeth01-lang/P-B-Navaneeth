@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import type { User } from "firebase/auth";
-import { collection, query, where, orderBy, onSnapshot, serverTimestamp } from "firebase/firestore";
+import { collection, query, where, orderBy, onSnapshot, serverTimestamp, doc, setDoc } from "firebase/firestore";
 import { 
   LayoutDashboard, 
   BookOpen, 
@@ -10,6 +10,7 @@ import {
   FileText, 
   Upload, 
   Download, 
+  ExternalLink,
   Trash2, 
   Plus, 
   ChevronRight, 
@@ -52,21 +53,68 @@ const loadPdfjs = async () => {
   return pdfjsLib;
 };
 
-import { StatCard, FileUpload, Toast } from "./components/Common";
+import { StatCard, FileUpload, Toast, Skeleton } from "./components/Common";
 import { MultiFileUpload } from "./components/Upload";
 
-const BookletAnnotator = React.lazy(() => import("./components/Evaluation").then(m => ({ default: m.BookletAnnotator })));
+const EvaluationDetailView = React.lazy(() => import("./components/Evaluation").then(m => ({ default: m.EvaluationDetailView })));
+const DashboardSkeleton = () => (
+  <div className="space-y-10">
+    <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 mb-4">
+      <div className="space-y-4">
+        <Skeleton className="h-12 w-64" />
+        <Skeleton className="h-4 w-48" />
+      </div>
+      <Skeleton className="h-16 w-32 rounded-[28px]" />
+    </div>
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <Skeleton className="h-32 rounded-[32px]" repeat={4} />
+    </div>
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <Skeleton className="h-[450px] rounded-[40px]" />
+      <Skeleton className="h-[450px] rounded-[40px] lg:col-span-2" />
+    </div>
+  </div>
+);
 const DashboardView = React.lazy(() => import("./components/DashboardView").then(m => ({ default: m.DashboardView })));
 const ExamItem = React.lazy(() => import("./components/ExamItem").then(m => ({ default: m.ExamItem })));
 const SubmissionsView = React.lazy(() => import("./components/SubmissionsView").then(m => ({ default: m.SubmissionsView })));
 const AboutView = React.lazy(() => import("./components/AboutView").then(m => ({ default: m.AboutView })));
+import { PdfViewer } from "./components/PdfViewer";
+import { AIEngineStatus } from "./components/AIEngineStatus";
 
 import { auth, db, storage, signInWithGoogle, logout, createExam, updateExam, deleteExam, createSubmission, updateSubmission, deleteSubmission, handleFirestoreError, OperationType, testConnection } from "./firebase";
 import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from "firebase/storage";
-import { cn, fileToBase64, fixHtml2CanvasOklch } from "./lib/utils";
+import { cn, fileToBase64, fixHtml2CanvasOklch, safeJsonStringify } from "./lib/utils";
 import { Exam, Submission, AppFeature, EvaluationQuestion } from "./types";
 import { storeFile, getFileUrl, deleteFile, clearAllFiles, getFileBlob } from "./lib/offline-storage";
 import { NativeStorageConfig, requestNativeFolder, verifyPermission, saveFileToNative, getFileFromNative, isRunningInIframe, isNativeStorageSupported } from "./lib/native-fs";
+
+// --- Storage Helpers ---
+
+const sanitizeExamsForStorage = (exams: Exam[]) => {
+  return exams.map(ex => {
+    // Deep clone and remove non-primitives
+    const clean: any = JSON.parse(safeJsonStringify(ex));
+    if (clean.questionPaperUrl?.startsWith("blob:")) {
+      clean.questionPaperUrl = clean.id + "_qp";
+    }
+    if (clean.markingSchemeUrl?.startsWith("blob:")) {
+      clean.markingSchemeUrl = clean.id + "_ms";
+    }
+    return clean;
+  });
+};
+
+const sanitizeSubmissionsForStorage = (submissions: Submission[]) => {
+  return submissions.map(sub => {
+    // Deep clone and remove non-primitives
+    const clean: any = JSON.parse(safeJsonStringify(sub));
+    if (clean.bookletUrl?.startsWith("blob:")) {
+      clean.bookletUrl = clean.id + "_booklet";
+    }
+    return clean;
+  });
+};
 
 // --- Utils ---
 
@@ -397,14 +445,55 @@ export default function App() {
     [sortedSubmissions, selectedExamId]
   );
 
-  const dashboardStats = React.useMemo(() => ({
-    totalExams: exams.length,
-    totalSubmissions: submissions.length,
-    evaluated: submissions.filter(s => s.status === "evaluated").length,
-    pending: submissions.filter(s => s.status === "pending").length,
-    recentExams: sortedExams.slice(0, 3),
-    recentPending: sortedSubmissions.filter(s => s.status === "pending").slice(0, 3)
-  }), [exams.length, submissions, sortedExams, sortedSubmissions]);
+  const dashboardStats = React.useMemo(() => {
+    const total = submissions.length;
+    const evaluatedCount = submissions.filter(s => s.status === "evaluated").length;
+    const pendingCount = submissions.filter(s => s.status === "pending").length;
+    
+    // Distribution for Pie Chart
+    const evaluated = evaluatedCount;
+    const pending = pendingCount;
+    
+    // Performance Time Series (last 7 days)
+    const last7Days = [...Array(7)].map((_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const daySubmissions = submissions.filter(s => 
+        s.status === "evaluated" && 
+        new Date(s.createdAt).toDateString() === d.toDateString()
+      );
+      const avg = daySubmissions.length > 0 
+        ? Math.round(daySubmissions.reduce((acc, s) => acc + (s.totalMarks || 0) / (s.maxMarks || 1) * 100, 0) / daySubmissions.length)
+        : 0;
+      return { name: dateStr, score: avg };
+    });
+
+    // Workload (Exams)
+    const examStats = exams.map(ex => {
+      const examSubmissions = submissions.filter(s => s.examId === ex.id);
+      const done = examSubmissions.filter(s => s.status === "evaluated").length;
+      return { 
+        name: ex.title.length > 15 ? ex.title.substring(0, 15) + "..." : ex.title, 
+        value: examSubmissions.length > 0 ? Math.round((done / examSubmissions.length) * 100) : 0 
+      };
+    }).slice(0, 5);
+
+    return {
+      totalExams: exams.length,
+      totalSubmissions: total,
+      evaluated,
+      pending,
+      recentExams: sortedExams.slice(0, 3),
+      recentPending: sortedSubmissions.filter(s => s.status === "pending").slice(0, 3),
+      distribution: [
+        { name: "Evaluated", value: evaluated, color: "#3b82f6" },
+        { name: "Pending", value: pending, color: "#1e293b" }
+      ],
+      performanceData: last7Days,
+      workloadData: examStats.length > 0 ? examStats : [{ name: "No Data", value: 0 }]
+    };
+  }, [exams, submissions, sortedExams, sortedSubmissions]);
 
   const currentSubmission = React.useMemo(() => 
     submissions.find(s => s.id === selectedSubmissionId),
@@ -434,6 +523,148 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(() => {
     return localStorage.getItem("grademaster_welcome_complete") !== "true";
   });
+
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewTitle, setPreviewTitle] = useState<string>("");
+
+  // Storage listener for Guest Mode Sync
+  useEffect(() => {
+    const handleStorageChange = async (e: StorageEvent) => {
+      if (!user || user.uid !== "guest_session") return;
+      
+      if (e.key === "grademaster_exams" || e.key === "grademaster_submissions") {
+        console.log("Storage change detected in another tab, syncing guest data...");
+        const localExamsRaw = JSON.parse(localStorage.getItem("grademaster_exams") || "[]");
+        const localSubmissionsRaw = JSON.parse(localStorage.getItem("grademaster_submissions") || "[]");
+        
+        const enrichedExams = await Promise.all(localExamsRaw.map(async (ex: any) => {
+          const qpUrl = await resolveLocalUrl(ex.id, ex.questionPaperUrl, "qp");
+          const msUrl = await resolveLocalUrl(ex.id, ex.markingSchemeUrl, "ms");
+          return { ...ex, questionPaperUrl: qpUrl, markingSchemeUrl: msUrl };
+        }));
+
+        const enrichedSubmissions = await Promise.all(localSubmissionsRaw.map(async (sub: any) => {
+          const bookletUrl = await resolveLocalUrl(sub.id, sub.bookletUrl, "booklet");
+          return { ...sub, bookletUrl };
+        }));
+
+        setExams(enrichedExams);
+        setSubmissions(enrichedSubmissions);
+      }
+    };
+
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, [user]);
+
+  const handlePreview = async (url: string, title: string) => {
+    if (!url) {
+      showToast("Document URL is missing or invalid.", "error");
+      return;
+    }
+
+    let finalUrl = url;
+    
+    // Check if it's a local key (doesn't start with protocol-like strings or root paths)
+    const isLikelyKey = !url.startsWith("http") && 
+                       !url.startsWith("https") && 
+                       !url.startsWith("data:") && 
+                       !url.startsWith("blob:") && 
+                       !url.startsWith("/") &&
+                       !url.startsWith("./");
+
+    if (isLikelyKey) {
+      try {
+        // Robust key resolution for local storage
+        const tryResolve = async (k: string) => {
+          try { return await getFileUrl(k); } catch { return null; }
+        };
+
+        // 1. Try the key exactly as passed (handles full keys)
+        let resolved = await tryResolve(url);
+        
+        // 2. If it's an ID, try adding suffixes (handles deterministic IDs)
+        if (!resolved) {
+          const hasSuffix = url.endsWith("_qp") || url.endsWith("_ms") || url.endsWith("_booklet") || url.endsWith("_sub");
+          if (!hasSuffix) {
+            resolved = await tryResolve(url + "_qp") || 
+                      await tryResolve(url + "_ms") || 
+                      await tryResolve(url + "_booklet");
+          }
+        }
+
+        // 3. Fallback: try stripping 'local_' if present and re-adding suffix (handles legacy mismatches)
+        if (!resolved && url.startsWith("local_")) {
+          const stripped = url.replace(/^local_/, "");
+          // Try variations: stripped, stripped_qp, stripped + (original suffix if we can guess it)
+          resolved = await tryResolve(stripped) || 
+                    await tryResolve(stripped + "_qp") ||
+                    await tryResolve(stripped + "_ms") ||
+                    await tryResolve(stripped + "_booklet");
+          
+          // 4. Second layer fallback: if it contains _qp_, _ms_ or _booklet_ in the middle
+          if (!resolved) {
+            const middleRegex = /(_qp_|_ms_|_booklet_|_sub_)/;
+            if (middleRegex.test(url)) {
+              const partStripped = url.replace(middleRegex, "_");
+              const suffix = url.match(middleRegex)?.[0].replace(/_/g, "");
+              if (suffix) {
+                resolved = await tryResolve(partStripped + "_" + suffix) ||
+                          await tryResolve(url.replace(/^local_/, "").replace(middleRegex, "_") + "_" + suffix);
+              }
+            }
+          }
+          
+          // 5. Last ditch: try searching for any key that ends with the unique numeric part
+          if (!resolved) {
+            const numericMatch = url.match(/\d{10,}/);
+            if (numericMatch) {
+              const timestamp = numericMatch[0];
+              // We can't easily search IndexedDB keys by regex without opening a cursor, 
+              // but we can try common prefixes
+              resolved = await tryResolve(timestamp) ||
+                        await tryResolve(timestamp + "_qp") ||
+                        await tryResolve("local_" + timestamp + "_qp") ||
+                        await tryResolve("local_sub_" + timestamp) ||
+                        await tryResolve("local_bulk_" + timestamp);
+            }
+          }
+        }
+
+        if (resolved) {
+          finalUrl = resolved;
+        } else {
+          throw new Error("Key resolution failed for: " + url);
+        }
+      } catch (err) {
+        console.error("Failed to resolve preview URL:", url);
+        showToast("Could not retrieve file. Local storage may have been cleared.", "error");
+        return;
+      }
+    }
+
+    // FINAL SAFETY: Ensure finalUrl is actually a valid URL string before setting preview state
+    const isValidUrl = finalUrl.startsWith("http") || 
+                      finalUrl.startsWith("data:") || 
+                      finalUrl.startsWith("blob:") || 
+                      finalUrl.startsWith("/");
+
+    if (!isValidUrl) {
+      console.warn("Invalid preview URL detected:", finalUrl);
+      showToast("Could not display document. Please re-upload.", "error");
+      return;
+    }
+
+    setPreviewUrl(finalUrl);
+    setPreviewTitle(title);
+  };
+
+  // Helper to get a download name for a preview URL
+  const getDownloadName = (originalTitle: string, url: string) => {
+    const isPdf = url.includes('.pdf') || url.includes('application/pdf') || url.startsWith('blob:');
+    const extension = isPdf ? '.pdf' : '.jpg';
+    return `${originalTitle.replace(/\s+/g, '_')}${extension}`;
+  };
 
   useEffect(() => {
     // Check initial permissions
@@ -467,6 +698,49 @@ export default function App() {
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
+
+  const resolveLocalUrl = async (id: string, storedUrl: string, type: "qp" | "ms" | "booklet") => {
+    if (!storedUrl) return storedUrl;
+    
+    // Check if it's already a working blob URL
+    if (storedUrl.startsWith("blob:")) return storedUrl;
+
+    try {
+      // 1. Try deterministic ID-based key first (most reliable)
+      const idKey = `${id}_${type}`;
+      try {
+        const url = await getFileUrl(idKey);
+        if (url) return url;
+      } catch {}
+
+      // 2. Try the stored URL itself as a key (handles Firebase URLs mapped to Blobs)
+      try {
+        const url = await getFileUrl(storedUrl);
+        if (url) return url;
+      } catch {}
+
+      // 3. Try variations if it looks like a local key
+      if (storedUrl.startsWith("local_")) {
+        try {
+          const stripped = storedUrl.replace(/^local_/, "");
+          const url = await getFileUrl(stripped);
+          if (url) return url;
+        } catch {}
+
+        if (!storedUrl.endsWith(`_${type}`)) {
+          try {
+            const stripped = storedUrl.replace(/^local_/, "");
+            const url = await getFileUrl(stripped + `_${type}`);
+            if (url) return url;
+          } catch {}
+        }
+      }
+
+      return storedUrl;
+    } catch (e) {
+      return storedUrl;
+    }
+  };
 
   useEffect(() => {
     console.log("App mounted, initializing auth...");
@@ -513,22 +787,14 @@ export default function App() {
       
       const refreshUrls = async () => {
         const enrichedExams = await Promise.all(localExamsRaw.map(async (ex: any) => {
-          try {
-            const qpUrl = ex.questionPaperUrl.startsWith("blob:") || ex.questionPaperUrl.startsWith("local_") ? await getFileUrl(ex.id + "_qp") : ex.questionPaperUrl;
-            const msUrl = ex.markingSchemeUrl.startsWith("blob:") || ex.markingSchemeUrl.startsWith("local_") ? await getFileUrl(ex.id + "_ms") : ex.markingSchemeUrl;
-            return { ...ex, questionPaperUrl: qpUrl, markingSchemeUrl: msUrl };
-          } catch (e) {
-            return ex;
-          }
+          const qpUrl = await resolveLocalUrl(ex.id, ex.questionPaperUrl, "qp");
+          const msUrl = await resolveLocalUrl(ex.id, ex.markingSchemeUrl, "ms");
+          return { ...ex, questionPaperUrl: qpUrl, markingSchemeUrl: msUrl };
         }));
 
         const enrichedSubmissions = await Promise.all(localSubmissionsRaw.map(async (sub: any) => {
-          try {
-            const bookletUrl = sub.bookletUrl.startsWith("blob:") || sub.bookletUrl.startsWith("local_") ? await getFileUrl(sub.id + "_booklet") : sub.bookletUrl;
-            return { ...sub, bookletUrl };
-          } catch (e) {
-            return sub;
-          }
+          const bookletUrl = await resolveLocalUrl(sub.id, sub.bookletUrl, "booklet");
+          return { ...sub, bookletUrl };
         }));
 
         setExams(enrichedExams);
@@ -558,15 +824,23 @@ export default function App() {
   useEffect(() => {
     if (!user || user.uid === "guest_session") return;
     const q = query(collection(db, "exams"), where("uid", "==", user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setExams(snapshot.docs.map(d => {
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      const docsData = snapshot.docs.map(d => {
         const data = d.data();
         return {
           id: d.id,
           ...data,
           createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
         } as Exam;
+      });
+
+      const enriched = await Promise.all(docsData.map(async ex => {
+        const qpUrl = await resolveLocalUrl(ex.id!, ex.questionPaperUrl, "qp");
+        const msUrl = await resolveLocalUrl(ex.id!, ex.markingSchemeUrl, "ms");
+        return { ...ex, questionPaperUrl: qpUrl, markingSchemeUrl: msUrl };
       }));
+
+      setExams(enriched);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, "exams");
     });
@@ -576,15 +850,22 @@ export default function App() {
   useEffect(() => {
     if (!user || user.uid === "guest_session") return;
     const q = query(collection(db, "submissions"), where("uid", "==", user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setSubmissions(snapshot.docs.map(d => {
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      const docsData = snapshot.docs.map(d => {
         const data = d.data();
         return {
           id: d.id,
           ...data,
           createdAt: data.createdAt?.toDate?.() ? data.createdAt.toDate().toISOString() : data.createdAt
         } as Submission;
+      });
+
+      const enriched = await Promise.all(docsData.map(async sub => {
+        const bookletUrl = await resolveLocalUrl(sub.id!, sub.bookletUrl, "booklet");
+        return { ...sub, bookletUrl };
       }));
+
+      setSubmissions(enriched);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, "submissions");
     });
@@ -671,56 +952,64 @@ export default function App() {
         getPdfMetadata(newExamMS)
       ]);
 
-      // Generate local fallback IDs
-      const localQpKey = `local_qp_${Date.now()}`;
-      const localMsKey = `local_ms_${Date.now()}`;
+      // Generate local fallback IDs - deterministic based on exam ID if possible later
+      let localQpKey = "";
+      let localMsKey = "";
 
-      // Save to IndexedDB (Instant)
-      await Promise.all([
-        storeFile(localQpKey, newExamQP),
-        storeFile(localMsKey, newExamMS)
-      ]);
-
-      // Save to Native Folder if authorized (True User ownership)
-      if (isNativeStorageEnabled && nativeFolderHandle) {
-        try {
-          const hasPermission = await verifyPermission(nativeFolderHandle);
-          if (hasPermission) {
-            await Promise.all([
-              saveFileToNative(nativeFolderHandle, `Exam_${Date.now()}_QP_${newExamQP.name}`, newExamQP),
-              saveFileToNative(nativeFolderHandle, `Exam_${Date.now()}_MS_${newExamMS.name}`, newExamMS)
-            ]);
-          }
-        } catch (e) {
-          console.warn("Native Save Failed:", e);
-        }
-      }
+      const docRef = doc(collection(db, "exams"));
+      const examId = docRef.id;
+      
+      // Use deterministic keys from the start
+      localQpKey = `${examId}_qp`;
+      localMsKey = `${examId}_ms`;
 
       setUploadStatus("Finalizing...");
       
       const examData = {
         uid: user.uid,
         title: newExamTitle,
-        questionPaperUrl: localQpKey, // Temporary local key
-        markingSchemeUrl: localMsKey, // Temporary local key
+        questionPaperUrl: localQpKey, 
+        markingSchemeUrl: localMsKey, 
         studentList: newExamStudentList.split('\n').map(s => s.trim()).filter(s => s !== ""),
         qpPageCount: qpMeta?.pageCount || 0,
         msPageCount: msMeta?.pageCount || 0,
         syncStatus: (user.uid === "guest_session" ? "ready" : "syncing") as any,
       };
 
-      let newExamId = "";
       if (user.uid === "guest_session") {
-        newExamId = "local_" + Math.random().toString(36).substring(2, 9);
-        const newExam = { id: newExamId, ...examData, createdAt: new Date().toISOString() };
+        const newExamId = "local_" + Math.random().toString(36).substring(2, 9);
+        const finalQpKey = `${newExamId}_qp`;
+        const finalMsKey = `${newExamId}_ms`;
+
+        // Save to IndexedDB (Instant)
+        await Promise.all([
+          storeFile(finalQpKey, newExamQP),
+          storeFile(finalMsKey, newExamMS)
+        ]);
+
+        const qpBlobUrl = await getFileUrl(finalQpKey).catch(() => finalQpKey);
+        const msBlobUrl = await getFileUrl(finalMsKey).catch(() => finalMsKey);
+        
+        const newExam = { 
+          id: newExamId, 
+          ...examData, 
+          questionPaperUrl: qpBlobUrl, 
+          markingSchemeUrl: msBlobUrl,
+          createdAt: new Date().toISOString() 
+        };
         setExams(prev => {
           const updated = [...prev, newExam];
-          localStorage.setItem("grademaster_exams", JSON.stringify(updated));
+          localStorage.setItem("grademaster_exams", safeJsonStringify(sanitizeExamsForStorage(updated)));
           return updated;
         });
       } else {
-        const docRef = await createExam(examData as any);
-        newExamId = docRef.id;
+        // Save to IndexedDB (Instant)
+        await Promise.all([
+          storeFile(localQpKey, newExamQP),
+          storeFile(localMsKey, newExamMS)
+        ]);
+        await setDoc(docRef, { ...examData, createdAt: serverTimestamp() });
+        const newExamId = examId;
 
         // Background Upload Flow
         (async () => {
@@ -781,10 +1070,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (newBooklet && !newStudentName && !isScanning) {
+    if (newBooklet && !newStudentName.trim() && !isScanning) {
       handleScanDetails(newBooklet);
     }
-  }, [newBooklet]);
+  }, [newBooklet, newStudentName]);
 
   const handleScanDetails = async (file: File) => {
     if (!file) return;
@@ -830,11 +1119,10 @@ export default function App() {
     try {
       // 1. Instant Processing
       setUploadStatus("Processing Local Data...");
-      const localBookletKey = `local_sub_${Date.now()}`;
+      let localBookletKey = "";
       
       const [bookletInfo] = await Promise.all([
         getPdfInfo(newBooklet, !newStudentName),
-        storeFile(localBookletKey, newBooklet),
         (isNativeStorageEnabled && nativeFolderHandle) ? 
           verifyPermission(nativeFolderHandle).then(has => has && saveFileToNative(nativeFolderHandle, `Submission_${Date.now()}_${newBooklet.name}`, newBooklet)) : 
           Promise.resolve()
@@ -843,7 +1131,10 @@ export default function App() {
       const bookletDataForAI = bookletInfo?.firstPage || null;
       let finalName = newStudentName || newBooklet.name.replace(/\.[^/.]+$/, "").replace(/[_]/g, " ");
 
-      // 2. Optimistic Entry
+      const docRef = doc(collection(db, "submissions"));
+      const subIdGenerated = docRef.id;
+      localBookletKey = `${subIdGenerated}_booklet`;
+
       const submissionData = {
         uid: user!.uid,
         examId: selectedExamId,
@@ -858,15 +1149,28 @@ export default function App() {
       let subId = "";
       if (user!.uid === "guest_session") {
         subId = "local_sub_" + Math.random().toString(36).substring(2, 9);
-        const newSub = { id: subId, ...submissionData, createdAt: new Date().toISOString() } as any;
+        const finalBookletKey = `${subId}_booklet`;
+
+        // Save to IndexedDB
+        await storeFile(finalBookletKey, newBooklet);
+
+        const bookletBlobUrl = await getFileUrl(finalBookletKey).catch(() => finalBookletKey);
+        const newSub = { 
+          id: subId, 
+          ...submissionData, 
+          bookletUrl: bookletBlobUrl,
+          createdAt: new Date().toISOString() 
+        } as any;
         setSubmissions(prev => {
           const updated = [...prev, newSub];
-          localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+          localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(updated)));
           return updated;
         });
       } else {
-        const docRef = await createSubmission(submissionData as any);
-        subId = docRef.id;
+        // Save to IndexedDB
+        await storeFile(localBookletKey, newBooklet);
+        await setDoc(docRef, submissionData);
+        subId = subIdGenerated;
 
         // Background Upload & Sync
         (async () => {
@@ -908,6 +1212,15 @@ export default function App() {
       setNewStudentName("");
       setNewBooklet(null);
       showToast(user!.uid === "guest_session" ? "Submission Added!" : "Submission Added & Syncing...", "success");
+
+      // Trigger AI Evaluation automatically
+      const newlyCreatedSub = user!.uid === "guest_session" 
+        ? { id: subId, ...submissionData, bookletUrl: localBookletKey }
+        : { id: subId, ...submissionData };
+      
+      console.log("Automatically triggering evaluation for:", subId);
+      handleEvaluate(newlyCreatedSub as any, true);
+
     } catch (error: any) {
       console.error("Add Submission Error:", error);
       showToast(error.message || "Failed to add submission.", "error");
@@ -972,10 +1285,19 @@ export default function App() {
         let currentSubId = "";
         if (user.uid === "guest_session") {
           currentSubId = "local_sub_" + Math.random().toString(36).substring(2, 9);
-          const newSub = { id: currentSubId, ...submissionData, createdAt: new Date().toISOString() } as any;
+          const deterministicKey = `${currentSubId}_booklet`;
+          await storeFile(deterministicKey, file);
+          
+          const newSub = { 
+            id: currentSubId, 
+            ...submissionData, 
+            bookletUrl: deterministicKey,
+            createdAt: new Date().toISOString() 
+          } as any;
+          
           setSubmissions(prev => {
             const updated = [...prev, newSub];
-            localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+            localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(updated)));
             return updated;
           });
           successCount++;
@@ -1015,6 +1337,13 @@ export default function App() {
             } catch (err) { /* silent fail for background scan */ }
           })();
         }
+
+        // Trigger AI Evaluation automatically (background)
+        const subToEvaluate = {
+          id: currentSubId,
+          ...submissionData
+        };
+        handleEvaluate(subToEvaluate as any, true);
       };
 
       // Process with concurrency limit to avoid freezing the browser
@@ -1083,7 +1412,7 @@ export default function App() {
       if (user?.uid === "guest_session") {
         setSubmissions(prev => {
           const updated = prev.map(s => s.id === submission.id ? { ...s, ...updateData } : s);
-          localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+          localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(updated)));
           return updated;
         });
       } else {
@@ -1175,7 +1504,7 @@ export default function App() {
           if (user?.uid === "guest_session") {
             setSubmissions(prev => {
               const updated = prev.map(s => s.id === submission.id ? { ...s, ...updateData } : s);
-              localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+              localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(updated)));
               return updated;
             });
           } else {
@@ -1211,7 +1540,7 @@ export default function App() {
       if (user?.uid === "guest_session") {
         setExams(prev => {
           const updated = prev.map(ex => ex.id === editingExam.id ? { ...ex, ...updateData } : ex);
-          localStorage.setItem("grademaster_exams", JSON.stringify(updated));
+          localStorage.setItem("grademaster_exams", safeJsonStringify(sanitizeExamsForStorage(updated)));
           return updated;
         });
       } else {
@@ -1246,11 +1575,11 @@ export default function App() {
       if (user?.uid === "guest_session") {
         const remainingSubmissions = submissions.filter(s => s.examId !== id);
         setSubmissions(remainingSubmissions);
-        localStorage.setItem("grademaster_submissions", JSON.stringify(remainingSubmissions));
+        localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(remainingSubmissions)));
 
         const remainingExams = exams.filter(ex => ex.id !== id);
         setExams(remainingExams);
-        localStorage.setItem("grademaster_exams", JSON.stringify(remainingExams));
+        localStorage.setItem("grademaster_exams", safeJsonStringify(sanitizeExamsForStorage(remainingExams)));
 
         // Cleanup local files
         deleteFile(id + "_qp");
@@ -1295,7 +1624,7 @@ export default function App() {
       if (user?.uid === "guest_session") {
         const remainingSubmissions = submissions.filter(s => !idsToDelete.includes(s.id!));
         setSubmissions(remainingSubmissions);
-        localStorage.setItem("grademaster_submissions", JSON.stringify(remainingSubmissions));
+        localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(remainingSubmissions)));
         idsToDelete.forEach(sid => deleteFile(sid + "_booklet"));
       } else {
         await Promise.all(idsToDelete.map(sid => deleteSubmission(sid)));
@@ -1424,7 +1753,7 @@ export default function App() {
       if (user?.uid === "guest_session") {
         setSubmissions(prev => {
           const updated = prev.map(s => ids.includes(s.id!) ? { ...s, status } : s);
-          localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+          localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(updated)));
           return updated;
         });
         success = ids.length;
@@ -1790,7 +2119,6 @@ export default function App() {
                 { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', desc: 'Overview of grading' },
                 { id: 'exams', icon: BookOpen, label: 'Exams', desc: 'Questions and schemes' },
                 { id: 'submissions', icon: FileCheck, label: 'Submissions', desc: 'Student booklets' },
-                { id: 'students', icon: Users, label: 'Roster', desc: 'Manage students' },
                 { id: 'settings', icon: Settings, label: 'Settings', desc: 'Storage & Account' },
                 { id: 'about', icon: Info, label: 'Help', desc: 'System information' },
               ].map((item) => (
@@ -1945,17 +2273,24 @@ export default function App() {
           }>
             <AnimatePresence mode="wait">
               {activeFeature === "dashboard" && (
-                <DashboardView 
-                  stats={dashboardStats} 
-                  onNavigate={(feature, examId) => {
-                    setActiveFeature(feature);
-                    if (examId) setSelectedExamId(examId);
-                  }}
-                  onLoadSample={async () => {
-                    if (!user) return;
-                    const tid = showToast("Configuring Evaluation Environment", "loading");
-                    try {
-                      const samplePdf = "data:application/pdf;base64,JVBERi0xLjcKJeLjz9MKMSAwIG9iagogIDw8IC9UeXBlIC9DYXRhbG9nIC9QYWdlcyAyIDAgUiA+PgplbmRvYmoKMiAwIG9iagogIDw8IC9UeXBlIC9QYWdlcyAvQ291bnQgMSAvS2lkcyBbIDMgMCBSIF0gPj4KZW5kb2JqCjMgMCBvYmoKICA8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1Jlc291cmNlcyA0IDAgUiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmogIDw8ID4+IGVuZG9iago1IDAgb2JqCiAgPDwgL0xlbmd0aCA0NCA+PiBzdHJlYW0KICAwIDAgMCAxIEsgYmYgQlQKICAvRjEgMjQgVGYgMTAwIDcwMCBUZCAoR3JhZGVNYXN0ZXIgRGVtb3EpIFRqIEVUCiAgZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyMzggMDAwMDAgbiAKMDAwMDAwMDI1OCAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM1MgolJUVPRgo=";
+                <motion.div
+                  key="dashboard"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.3 }}
+                >
+                  <DashboardView 
+                    stats={dashboardStats} 
+                    onNavigate={(feature, examId) => {
+                      setActiveFeature(feature);
+                      if (examId) setSelectedExamId(examId);
+                    }}
+                    onLoadSample={async () => {
+                      if (!user) return;
+                      const tid = showToast("Configuring Evaluation Environment", "loading");
+                      try {
+                        const samplePdf = "data:application/pdf;base64,JVBERi0xLjcKJeLjz9MKMSAwIG9iagogIDw8IC9UeXBlIC9DYXRhbG9nIC9QYWdlcyAyIDAgUiA+PgplbmRvYmoKMiAwIG9iagogIDw8IC9UeXBlIC9QYWdlcyAvQ291bnQgMSAvS2lkcyBbIDMgMCBSIF0gPj4KZW5kb2JqCjMgMCBvYmoKICA8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1Jlc291cmNlcyA0IDAgUiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmogIDw8ID4+IGVuZG9iago1IDAgb2JqCiAgPDwgL0xlbmd0aCA0NCA+PiBzdHJlYW0KICAwIDAgMCAxIEsgYmYgQlQKICAvRjEgMjQgVGYgMTAwIDcwMCBUZCAoR3JhZGVNYXN0ZXIgRGVtb3EpIFRqIEVUCiAgZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyMzggMDAwMDAgbiAKMDAwMDAwMDI1OCAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjM1MgolJUVPRgo=";
                       const examData = {
                         uid: user.uid,
                         title: "Quantum Physics: Wave-Particle Duality Master",
@@ -1970,7 +2305,7 @@ export default function App() {
                         exam = { id, ...examData, createdAt: new Date().toISOString() };
                         setExams(prev => {
                           const updated = [...prev, exam];
-                          localStorage.setItem("grademaster_exams", JSON.stringify(updated));
+                          localStorage.setItem("grademaster_exams", safeJsonStringify(sanitizeExamsForStorage(updated)));
                           return updated;
                         });
                       } else {
@@ -2071,7 +2406,7 @@ export default function App() {
                             const sid = "local_sub_" + Math.random().toString(36).substring(2, 9);
                             setSubmissions(prev => {
                               const updated = [...prev, { id: sid, ...subData, createdAt: new Date().toISOString() }];
-                              localStorage.setItem("grademaster_submissions", JSON.stringify(updated));
+                              localStorage.setItem("grademaster_submissions", safeJsonStringify(sanitizeSubmissionsForStorage(updated)));
                               return updated;
                             });
                           } else {
@@ -2088,7 +2423,8 @@ export default function App() {
                     }
                   }}
                 />
-              )}
+              </motion.div>
+            )}
 
             {activeFeature === "exams" && (
               <motion.div
@@ -2114,21 +2450,36 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <motion.div 
+                  initial="hidden"
+                  animate="show"
+                  variants={{
+                    show: {
+                      transition: {
+                        staggerChildren: 0.1
+                      }
+                    }
+                  }}
+                  className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
+                >
                   {sortedExams.map(exam => (
-                    <ExamItem 
-                      key={exam.id} 
-                      exam={exam} 
-                      onSelect={() => { setSelectedExamId(exam.id!); setActiveFeature("submissions"); }}
-                      onEdit={() => setEditingExam(exam)}
-                      onDelete={() => handleDeleteExam(exam.id!, exam.title)}
-                      onManageStudents={() => {
-                        setIsManagingStudents(exam.id!);
-                        setNewExamStudentList(exam.studentList?.join('\n') || "");
+                    <motion.div
+                      key={exam.id}
+                      variants={{
+                        hidden: { opacity: 0, y: 20 },
+                        show: { opacity: 1, y: 0 }
                       }}
-                    />
+                    >
+                      <ExamItem 
+                        exam={exam} 
+                        onSelect={() => { setSelectedExamId(exam.id!); setActiveFeature("submissions"); }}
+                        onEdit={() => setEditingExam(exam)}
+                        onDelete={() => handleDeleteExam(exam.id!, exam.title)}
+                        onPreview={handlePreview}
+                      />
+                    </motion.div>
                   ))}
-                </div>
+                </motion.div>
 
                 {exams.length === 0 && (
                   <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -2200,17 +2551,6 @@ export default function App() {
                             animate={{ opacity: 1, y: 0 }}
                             className="space-y-10"
                           >
-                            <div className="space-y-3">
-                              <label className="text-[10px] font-mono font-bold uppercase tracking-[0.2em] text-slate-500 px-1">Student Registry (Line-Delimited)</label>
-                              <textarea 
-                                rows={4}
-                                value={newExamStudentList}
-                                onChange={(e) => setNewExamStudentList(e.target.value)}
-                                placeholder="CANDIDATE-001&#10;CANDIDATE-002&#10;..."
-                                className="w-full bg-slate-950/50 border border-slate-800/60 rounded-[28px] p-6 text-white focus:outline-none focus:ring-1 focus:ring-blue-500/30 transition-all font-mono text-sm leading-relaxed"
-                              />
-                            </div>
-
                             <button 
                               type="submit"
                               disabled={isSubmitting}
@@ -2312,6 +2652,7 @@ export default function App() {
                       }
                     }}
                     onBulkStatusUpdate={handleBulkStatusUpdate}
+                    onPreview={handlePreview}
                   isEvaluating={isEvaluating}
                   isOnline={isOnline}
                 />
@@ -2340,47 +2681,21 @@ export default function App() {
                               </div>
                             )}
                           </div>
-                          {exams.find(e => e.id === selectedExamId)?.studentList?.length ? (
-                            <div className="space-y-2">
-                              <select
-                                value={newStudentName === "" ? "" : (exams.find(e => e.id === selectedExamId)?.studentList?.includes(newStudentName) ? newStudentName : "custom")}
-                                onChange={(e) => {
-                                  if (e.target.value === "custom") {
-                                    setNewStudentName(" "); // trigger custom input
-                                  } else {
-                                    setNewStudentName(e.target.value);
-                                  }
-                                }}
-                                className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all appearance-none"
-                              >
-                                <option value="">Select Student (Optional - AI will auto-scan)</option>
-                                {exams.find(e => e.id === selectedExamId)?.studentList?.map(name => (
-                                  <option key={name} value={name}>{name}</option>
-                                ))}
-                                <option value="custom">-- Other (Type Name) --</option>
-                              </select>
-                              {(newStudentName === " " || (newStudentName !== "" && !exams.find(e => e.id === selectedExamId)?.studentList?.includes(newStudentName))) && (
-                                <input 
-                                  autoFocus
-                                  value={newStudentName === " " ? "" : newStudentName}
-                                  placeholder="Enter student name manually"
-                                  className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all"
-                                  onChange={(e) => setNewStudentName(e.target.value)}
-                                />
-                              )}
-                            </div>
-                          ) : (
-                            <input 
-                              value={newStudentName}
-                              onChange={(e) => setNewStudentName(e.target.value)}
-                              placeholder="Optional - AI will scan booklet for name"
-                              className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all"
-                            />
-                          )}
+                          <input 
+                            value={newStudentName}
+                            onChange={(e) => setNewStudentName(e.target.value)}
+                            placeholder="Optional - AI will scan booklet for name"
+                            className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all"
+                          />
                         </div>
                         <FileUpload 
                           label="Answer Booklet" 
-                          onUpload={setNewBooklet} 
+                          onUpload={(file) => {
+                            setNewBooklet(file);
+                            if (!newStudentName.trim()) {
+                              handleScanDetails(file);
+                            }
+                          }} 
                           file={newBooklet} 
                           accept={{ 'image/*': [], 'application/pdf': [], 'application/octet-stream': [], '*': [] }}
                         />
@@ -2391,11 +2706,19 @@ export default function App() {
                           >
                             <button 
                               type="submit"
-                              disabled={isUploading}
+                              disabled={isUploading || isScanning}
                               className="w-full py-5 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 disabled:opacity-50 flex items-center justify-center gap-3"
                             >
                               {isUploading ? (
-                                <Loader2 className="w-5 h-5 animate-spin" />
+                                <>
+                                  <Loader2 className="w-5 h-5 animate-spin" />
+                                  <span>Uploading...</span>
+                                </>
+                              ) : isScanning ? (
+                                <>
+                                  <Loader2 className="w-5 h-5 animate-spin" />
+                                  <span>AI Extracting Identity...</span>
+                                </>
                               ) : (
                                 <>
                                   <FileCheck className="w-5 h-5" />
@@ -2475,159 +2798,6 @@ export default function App() {
               </motion.div>
             )}
 
-            {activeFeature === "students" && (
-              <motion.div
-                key="students"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="max-w-6xl mx-auto"
-              >
-                <div className="flex items-center justify-between mb-10">
-                  <div>
-                    <h1 className="text-3xl font-bold text-white mb-2">Student Lists</h1>
-                    <p className="text-slate-500">Manage student rosters for each exam to track submissions.</p>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {sortedExams.map(exam => {
-                    const examSubmissions = submissions.filter(s => s.examId === exam.id);
-                    const submittedCount = examSubmissions.length;
-                    const totalStudents = exam.studentList?.length || 0;
-                    
-                    return (
-                      <div key={exam.id} className="p-6 rounded-[32px] bg-slate-900 border border-slate-800 hover:border-slate-700 transition-all group relative">
-                        <div className="flex items-start justify-between mb-6">
-                          <div className="w-12 h-12 bg-purple-600/20 rounded-2xl flex items-center justify-center">
-                            <Users className="w-6 h-6 text-purple-500" />
-                          </div>
-                          <button 
-                            onClick={() => {
-                              setIsManagingStudents(exam.id!);
-                              setNewExamStudentList(exam.studentList?.join('\n') || "");
-                            }}
-                            className="p-2 text-slate-600 hover:text-blue-400 transition-colors"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <h3 className="text-xl font-bold text-white mb-2">{exam.title}</h3>
-                        <div className="flex items-center gap-4 mb-6">
-                          <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-blue-600 transition-all duration-500" 
-                              style={{ width: `${totalStudents > 0 ? (submittedCount / totalStudents) * 100 : 0}%` }}
-                            />
-                          </div>
-                          <span className="text-xs font-bold text-slate-400">{submittedCount}/{totalStudents}</span>
-                        </div>
-                        
-                        <div className="space-y-2 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
-                          {exam.studentList?.map((student, idx) => {
-                            const hasSubmitted = examSubmissions.some(s => s.studentName.toLowerCase() === student.toLowerCase());
-                            return (
-                              <div key={idx} className="flex items-center justify-between text-sm p-2 rounded-lg bg-slate-800/30">
-                                <span className={cn("font-medium", hasSubmitted ? "text-white" : "text-slate-500")}>{student}</span>
-                                {hasSubmitted ? (
-                                  <CheckCircle className="w-4 h-4 text-green-500" />
-                                ) : (
-                                  <div className="w-4 h-4 rounded-full border border-slate-700" />
-                                )}
-                              </div>
-                            );
-                          })}
-                          {(!exam.studentList || exam.studentList.length === 0) && (
-                            <p className="text-xs text-slate-600 italic">No students added yet.</p>
-                          )}
-                        </div>
-
-                        <button 
-                          onClick={() => {
-                            setIsManagingStudents(exam.id!);
-                            setNewExamStudentList(exam.studentList?.join('\n') || "");
-                          }}
-                          className="w-full mt-6 py-3 bg-slate-800 text-white text-sm font-bold rounded-xl hover:bg-slate-700 transition-colors"
-                        >
-                          Manage Roster
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {isManagingStudents && (
-                  <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-6">
-                    <motion.div 
-                      initial={{ scale: 0.9, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      className="bg-slate-900 border border-slate-800 rounded-[40px] p-10 max-w-2xl w-full shadow-2xl"
-                    >
-                      <div className="flex items-center justify-between mb-8">
-                        <div>
-                          <h2 className="text-2xl font-bold text-white">Manage Roster</h2>
-                          <p className="text-slate-500 text-sm">{exams.find(e => e.id === isManagingStudents)?.title}</p>
-                        </div>
-                        <button onClick={() => setIsManagingStudents(null)} className="p-2 hover:bg-slate-800 rounded-full transition-colors">
-                          <X className="w-6 h-6 text-slate-500" />
-                        </button>
-                      </div>
-                      
-                      <div className="space-y-6">
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold uppercase tracking-widest text-slate-500">Student Names (One per line)</label>
-                          <textarea 
-                            rows={10}
-                            value={newExamStudentList}
-                            onChange={(e) => setNewExamStudentList(e.target.value)}
-                            placeholder="CANDIDATE-001&#10;CANDIDATE-002&#10;..."
-                            className="w-full bg-slate-800 border border-slate-700 rounded-2xl p-4 text-white focus:outline-none focus:border-blue-500 transition-all font-mono text-sm"
-                          />
-                        </div>
-                        
-                        <div className="flex gap-4">
-                          <button 
-                            onClick={() => setIsManagingStudents(null)}
-                            className="flex-1 py-4 bg-slate-800 text-white font-bold rounded-2xl hover:bg-slate-700 transition-all"
-                          >
-                            Cancel
-                          </button>
-                          <button 
-                            disabled={isSubmitting}
-                            onClick={async () => {
-                              const list = newExamStudentList.split('\n').map(s => s.trim()).filter(s => s !== "");
-                              setIsSubmitting(true);
-                              try {
-                                if (user?.uid === "guest_session" && isManagingStudents) {
-                                  setExams(prev => {
-                                    const updated = prev.map(ex => ex.id === isManagingStudents ? { ...ex, studentList: list } : ex);
-                                    localStorage.setItem("grademaster_exams", JSON.stringify(updated));
-                                    return updated;
-                                  });
-                                } else if (isManagingStudents) {
-                                  await updateExam(isManagingStudents, { studentList: list });
-                                }
-                                setIsManagingStudents(null);
-                                setNewExamStudentList("");
-                                showToast("Roster updated successfully", "success");
-                              } catch (e) {
-                                showToast("Failed to update roster", "error");
-                              } finally {
-                                setIsSubmitting(false);
-                              }
-                            }}
-                            className="flex-1 py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-500 transition-all flex items-center justify-center gap-2"
-                          >
-                            {isSubmitting ? <Loader2 className="w-5 h-5 animate-spin" /> : "Save Roster"}
-                          </button>
-                        </div>
-                      </div>
-                    </motion.div>
-                  </div>
-                )}
-              </motion.div>
-            )}
-
             {activeFeature === "evaluate" && currentSubmission && (
               <motion.div
                 key="evaluate"
@@ -2653,14 +2823,14 @@ export default function App() {
                       return (
                         <div className="flex gap-2">
                           <button 
-                            onClick={() => window.open(exam.questionPaperUrl, '_blank')}
+                            onClick={() => handlePreview(exam.questionPaperUrl, `${exam.title} - Question Paper`)}
                             className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-2xl text-blue-400 hover:bg-blue-500 hover:text-white transition-all shadow-inner"
                             title="View Question Paper"
                           >
                             <FileText className="w-5 h-5" />
                           </button>
                           <button 
-                            onClick={() => window.open(exam.markingSchemeUrl, '_blank')}
+                            onClick={() => handlePreview(exam.markingSchemeUrl, `${exam.title} - Marking Scheme`)}
                             className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-400 hover:bg-emerald-500 hover:text-white transition-all shadow-inner"
                             title="View Marking Scheme"
                           >
@@ -2672,12 +2842,20 @@ export default function App() {
                     {currentSubmission.status === "evaluated" && (
                       <div className="flex gap-2">
                         <button 
-                          onClick={() => {
+                          onClick={async () => {
+                            let url = currentSubmission.bookletUrl;
+                            if (!url.startsWith("http") && !url.startsWith("data:") && !url.startsWith("blob:") && !url.startsWith("/")) {
+                              try {
+                                url = await getFileUrl(url).catch(() => getFileUrl(currentSubmission.id + "_booklet"));
+                              } catch (e) {
+                                showToast("Could not download file. It may have been cleared.", "error");
+                                return;
+                              }
+                            }
                             const link = document.createElement('a');
-                            link.href = currentSubmission.bookletUrl;
+                            link.href = url;
                             link.download = `Submission_${currentSubmission.studentName}.pdf`;
-                            // If it's a data URI or blob, we don't necessarily need target _blank
-                            if (!currentSubmission.bookletUrl.startsWith('data:')) {
+                            if (!url.startsWith('data:')) {
                               link.target = "_blank";
                             }
                             document.body.appendChild(link);
@@ -2724,117 +2902,17 @@ export default function App() {
                     </div>
                   </div>
                 ) : currentSubmission.status === "evaluated" ? (
-                  <div className="space-y-6 lg:space-y-10">
-                    <div ref={reportRef} className="space-y-12 sm:space-y-16 bg-slate-900/40 border border-slate-800/60 rounded-[48px] p-8 sm:p-14 backdrop-blur-3xl shadow-2xl relative overflow-hidden group">
-                      <div className="absolute top-0 right-0 p-14 opacity-[0.03] group-hover:opacity-[0.05] transition-opacity pointer-events-none">
-                         <Sparkles className="w-80 h-80" />
-                      </div>
-                      
-                      <div className="flex flex-col md:flex-row md:items-end justify-between border-b border-slate-800/80 pb-12 sm:pb-16 gap-8 relative z-10">
-                        <div className="space-y-6">
-                          <div className="flex items-center gap-4">
-                             <div className="w-1.5 h-12 bg-blue-600 rounded-full" />
-                             <div>
-                                <h2 className="text-4xl sm:text-5xl font-display font-black text-white italic tracking-tighter leading-none">{currentSubmission.studentName}</h2>
-                                <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-3">Grading Report</p>
-                             </div>
-                          </div>
-                          <div className="flex items-center gap-4">
-                            <div className="px-4 py-1.5 bg-blue-600/10 border border-blue-500/20 rounded-xl flex items-center gap-2">
-                               <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-widest">Exam</span>
-                               <span className="text-sm font-bold text-white italic">{exams.find(e => e.id === currentSubmission.examId)?.title}</span>
-                            </div>
-                            <div className="px-4 py-1.5 bg-slate-800/50 border border-slate-700/50 rounded-xl flex items-center gap-2">
-                               <CheckCircle className="w-3.5 h-3.5 text-slate-500" />
-                               <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">Graded by AI</span>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="md:text-right bg-slate-950/40 p-8 sm:p-0 rounded-[32px] md:bg-transparent border md:border-none border-slate-800/60 shadow-inner md:shadow-none">
-                          <p className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 mb-2">Aggregate Grade</p>
-                          <div className="flex flex-col md:items-end">
-                            <p className="text-5xl sm:text-7xl font-black text-white tracking-tighter leading-none flex items-baseline gap-2">
-                               <span className="text-blue-500">{currentSubmission.totalMarks}</span> 
-                               <span className="text-2xl sm:text-3xl text-slate-800 font-mono italic">/</span>
-                               <span className="text-2xl sm:text-3xl text-slate-600 font-display italic">{currentSubmission.maxMarks}</span>
-                            </p>
-                            <div className="flex items-center gap-3 mt-4 md:justify-end">
-                               <div className="h-1.5 w-32 bg-slate-800 rounded-full overflow-hidden">
-                                  <motion.div 
-                                    initial={{ width: 0 }}
-                                    animate={{ width: `${(currentSubmission.totalMarks / currentSubmission.maxMarks) * 100}%` }}
-                                    transition={{ duration: 1.5, ease: "easeOut" }}
-                                    className="h-full bg-blue-500" 
-                                  />
-                               </div>
-                               <p className="text-xl font-display font-black text-blue-400/80 italic">
-                                 {((currentSubmission.totalMarks / currentSubmission.maxMarks) * 100).toFixed(1)}%
-                               </p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="space-y-10 relative z-10">
-                        <div className="flex items-center justify-between">
-                          <h3 className="text-2xl font-display font-black text-white italic flex items-center gap-3">
-                            <FileCheck className="w-6 h-6 text-blue-500" />
-                            Question Feedback
-                          </h3>
-                        </div>
-                        <div className="grid grid-cols-1 gap-6">
-                          {currentSubmission.evaluationData?.questions.map((q: EvaluationQuestion, i: number) => (
-                            <div key={i} className="group/card p-8 sm:p-10 rounded-[40px] bg-slate-800/20 border border-slate-800/60 hover:border-blue-500/30 transition-all duration-500 backdrop-blur-xl relative overflow-hidden">
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 mb-10 relative z-10">
-                                <div className="flex items-center gap-5">
-                                  <div className="w-16 h-16 bg-slate-950 rounded-[22px] border border-slate-800 flex items-center justify-center text-blue-500 font-black text-lg shadow-inner group-hover/card:scale-110 group-hover/card:rotate-3 transition-all duration-500">Q{q.questionNumber}</div>
-                                  <div>
-                                    <p className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest mb-1">Location</p>
-                                    <p className="text-sm font-bold text-white font-display italic">Page {q.pageNumber}</p>
-                                  </div>
-                                </div>
-                                <div className="self-start sm:self-auto px-6 py-3 bg-slate-950 rounded-2xl text-base font-black text-blue-400 border border-slate-800/80 flex items-center gap-3 shadow-inner">
-                                  <span className="text-[10px] font-mono font-bold text-slate-600 uppercase tracking-[0.2em] mr-1">Awarded</span>
-                                  <span className="text-xl leading-none">{q.marksAwarded}</span>
-                                  <span className="text-slate-800 font-mono">/</span>
-                                  <span className="text-slate-500 leading-none">{q.maxMarks}</span>
-                                </div>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-10 relative z-10">
-                                <div className="space-y-4">
-                                  <div className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 flex items-center gap-3">
-                                    <div className="w-2 h-2 rounded-full bg-blue-600" />
-                                    Transcription
-                                  </div>
-                                  <div className="p-6 rounded-[28px] bg-slate-950/40 border border-slate-800/50 min-h-[100px] shadow-inner group-hover/card:bg-slate-950/60 transition-colors">
-                                    <p className="text-sm text-slate-400 italic leading-relaxed font-medium">"{q.transcription}"</p>
-                                  </div>
-                                </div>
-                                <div>
-                                  <div className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-slate-600 mb-4 flex items-center gap-3">
-                                    <div className="w-2 h-2 rounded-full bg-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.5)]" />
-                                    AI Feedback
-                                  </div>
-                                  <div className="p-6 rounded-[28px] bg-purple-500/5 border border-purple-500/10 min-h-[100px] shadow-inner group-hover/card:bg-purple-500/10 transition-colors">
-                                    <p className="text-sm text-purple-100/80 leading-relaxed font-medium">{q.feedback}</p>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="px-1 sm:px-0">
-                      <React.Suspense fallback={<div className="h-64 flex flex-col items-center justify-center space-y-4 bg-slate-900/50 rounded-3xl border border-slate-800"><Loader2 className="w-8 h-8 text-blue-500 animate-spin" /><p className="text-slate-500 font-medium">Loading evaluation tools...</p></div>}>
-                        <BookletAnnotator 
-                          bookletUrl={currentSubmission.bookletUrl} 
-                          questions={currentSubmission.evaluationData?.questions || []} 
-                        />
-                      </React.Suspense>
-                    </div>
-                  </div>
+                  <React.Suspense fallback={<div className="h-[60vh] flex flex-col items-center justify-center space-y-6 px-6 bg-slate-900/50 rounded-[48px] border border-slate-800"><Loader2 className="w-12 h-12 text-blue-500 animate-spin" /><p className="text-slate-500 font-medium font-display italic">Loading deep analysis...</p></div>}>
+                    <EvaluationDetailView 
+                      submission={currentSubmission}
+                      exam={exams.find(e => e.id === currentSubmission.examId)}
+                      reportRef={reportRef}
+                      onExportPDF={() => exportPDF()}
+                      onPreview={handlePreview}
+                      onReevaluate={() => handleEvaluate(currentSubmission)}
+                      isEvaluating={isEvaluating}
+                    />
+                  </React.Suspense>
                 ) : (
                   <div className="h-[60vh] flex flex-col items-center justify-center text-center p-6 sm:p-10 bg-slate-900/50 border border-slate-800 border-dashed rounded-[32px] sm:rounded-[40px]">
                     <div className="w-16 h-16 sm:w-20 sm:h-20 bg-slate-800 rounded-3xl flex items-center justify-center mb-6">
@@ -3249,6 +3327,72 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Document Preview Modal */}
+      <AnimatePresence>
+        {previewUrl && (
+          <div className="fixed inset-0 z-[4000] flex items-center justify-center p-4 sm:p-10">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setPreviewUrl(null)}
+              className="absolute inset-0 bg-slate-950/90 backdrop-blur-xl"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full h-full max-w-6xl bg-slate-900 border border-slate-800 rounded-[32px] shadow-2xl overflow-hidden flex flex-col technical-border"
+            >
+              <div className="flex items-center justify-between p-6 border-b border-slate-800">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-display font-black text-white italic tracking-tight">{previewTitle}</h3>
+                    <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mt-0.5">Secure Document Viewer</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button 
+                    onClick={() => {
+                      const link = document.createElement('a');
+                      link.href = previewUrl;
+                      link.download = getDownloadName(previewTitle, previewUrl);
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                      showToast("Download started", "success");
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-white transition-all font-mono text-[10px] uppercase tracking-widest shadow-lg shadow-blue-500/20"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download
+                  </button>
+                  <button 
+                    onClick={() => window.open(previewUrl, '_blank')}
+                    className="flex items-center gap-2 px-4 py-2 hover:bg-slate-800 rounded-xl text-slate-400 hover:text-white transition-all font-mono text-[10px] uppercase tracking-widest border border-slate-800"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    Open
+                  </button>
+                  <button 
+                    onClick={() => setPreviewUrl(null)}
+                    className="p-3 hover:bg-slate-800 rounded-xl text-slate-400 hover:text-white transition-all border border-slate-800"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 bg-slate-950/50 p-2 sm:p-4 overflow-hidden relative">
+                <PdfViewer url={previewUrl} />
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Delete Confirmation Modal */}
       <AnimatePresence>
         {deleteModal.isOpen && (
@@ -3326,6 +3470,7 @@ export default function App() {
           ))}
         </AnimatePresence>
       </div>
+      <AIEngineStatus />
     </div>
   );
 }

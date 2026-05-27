@@ -40,6 +40,35 @@ export const fixHtml2CanvasOklch = (clonedDoc: Document) => {
   }
 };
 
+export const safeJsonStringify = (obj: any): string => {
+  const cache = new Set();
+  try {
+    return JSON.stringify(obj, (key, value) => {
+      if (typeof value === 'object' && value !== null) {
+        if (cache.has(value)) {
+          return "[Circular]";
+        }
+        cache.add(value);
+      }
+      // Handle special objects like File, Blob, Error
+      if (value instanceof Error) {
+        return {
+          name: value.name,
+          message: value.message,
+          stack: value.stack
+        };
+      }
+      return value;
+    });
+  } catch (err) {
+    try {
+      return String(obj);
+    } catch (e) {
+      return "Unstringifiable object";
+    }
+  }
+};
+
 export const fileToBase64 = (file: File): Promise<{ data: string; mimeType: string }> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

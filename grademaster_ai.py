@@ -15,7 +15,7 @@ class GradeMasterAI:
         Initialize GradeMaster AI with Gemini API Key.
         """
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
 
     def _get_file_data(self, file_path: str):
         """Helper to prepare file for Gemini API"""

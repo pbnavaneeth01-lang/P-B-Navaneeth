@@ -8,10 +8,28 @@ import {
   ChevronRight,
   FileText,
   Cpu,
-  BrainCircuit
+  BrainCircuit,
+  TrendingUp,
+  BarChart3,
+  PieChart as PieChartIcon,
+  Activity
 } from "lucide-react";
 import { motion } from "motion/react";
 import { StatCard } from "./Common";
+import { 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer, 
+  Cell,
+  PieChart,
+  Pie,
+  LineChart,
+  Line,
+} from "recharts";
 
 export const DashboardView = React.memo(({ 
   stats, 
@@ -22,13 +40,43 @@ export const DashboardView = React.memo(({
   onNavigate: (feature: any, examId?: string) => void;
   onLoadSample?: () => Promise<void>;
 }) => {
+  // Chart Data Preparation
+  const statusData = [
+    { name: "Evaluated", value: stats.evaluated, color: "#10b981" },
+    { name: "Pending", value: stats.pending, color: "#f59e0b" },
+  ].filter(i => i.value > 0);
+
+  const examSubmissionData = stats.recentExams.map((ex: any) => ({
+    name: ex.title.length > 15 ? ex.title.substring(0, 15) + "..." : ex.title,
+    count: stats.submissionsCountByExam?.[ex.id] || 0
+  })).reverse();
+
+  const performanceData = stats.recentExams.map((ex: any) => ({
+    name: ex.title.length > 10 ? ex.title.substring(0, 10) : ex.title,
+    score: stats.avgScoreByExam?.[ex.id] || 0
+  })).reverse();
+
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl shadow-2xl backdrop-blur-md">
+          <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">{label}</p>
+          <p className="text-sm font-black text-white italic">
+            {payload[0].value} {payload[0].name === "score" ? "% Average" : "Submissions"}
+          </p>
+        </div>
+      );
+    }
+    return null;
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="max-w-7xl mx-auto space-y-12"
+      className="max-w-7xl mx-auto space-y-10"
     >
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 mb-12">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 mb-4">
         <div className="space-y-4">
           <div className="flex items-center gap-3">
              <div className="w-1.5 h-12 bg-blue-600 rounded-full" />
@@ -36,29 +84,31 @@ export const DashboardView = React.memo(({
               <h1 className="text-5xl font-display font-black text-white italic tracking-tighter leading-none">
                 GradeMaster
               </h1>
-              <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Evaluation Overview</p>
+              <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Evaluation Intelligence</p>
              </div>
           </div>
-          <p className="text-slate-400 text-lg font-medium max-w-xl leading-relaxed">Performance metrics and grading status for exams.</p>
+          <p className="text-slate-400 text-lg font-medium max-w-xl leading-relaxed">Cognitive analytics for your academic assessments.</p>
         </div>
         
         <div className="flex items-center gap-6 bg-slate-900/50 backdrop-blur-xl border border-slate-800 p-6 rounded-[28px] technical-border">
           <div className="text-right">
-             <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">Status</p>
-             <p className="text-sm font-black text-emerald-400 uppercase tracking-tight">All Online</p>
+             <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">Engines</p>
+             <p className="text-sm font-black text-emerald-400 uppercase tracking-tight">Active & Syncing</p>
           </div>
           <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
-             <CheckCircle className="text-emerald-400 w-6 h-6" />
+             <Activity className="text-emerald-400 w-6 h-6 animate-pulse" />
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard title="Active Exams" value={stats.totalExams} icon={BookOpen} color="bg-blue-600" />
+        <StatCard title="Total Exams" value={stats.totalExams} icon={BookOpen} color="bg-blue-600" />
         <StatCard title="Processed" value={stats.totalSubmissions} icon={FileCheck} color="bg-indigo-600" />
         <StatCard title="Evaluation OK" value={stats.evaluated} icon={CheckCircle} color="bg-emerald-600" />
         <StatCard title="Awaiting" value={stats.pending} icon={AlertCircle} color="bg-orange-600" />
       </div>
+
+
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2 p-10 rounded-[40px] bg-slate-900/40 border border-slate-800/60 shadow-2xl backdrop-blur-xl relative overflow-hidden group">
@@ -69,7 +119,7 @@ export const DashboardView = React.memo(({
           <div className="flex items-center justify-between mb-10">
             <div>
               <h2 className="text-2xl font-display font-black text-white italic">Recent Exam Papers</h2>
-              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Exam List</p>
+              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Active Modules</p>
             </div>
             <button className="text-xs font-black text-blue-500 uppercase tracking-widest hover:text-blue-400 transition-colors">View All</button>
           </div>
@@ -82,15 +132,16 @@ export const DashboardView = React.memo(({
                 className="group w-full p-6 rounded-3xl bg-slate-800/30 border border-slate-800/50 hover:border-blue-500/50 hover:bg-slate-800/50 transition-all duration-300 flex items-center justify-between"
               >
                 <div className="flex items-center gap-5">
-                  <div className="w-14 h-14 bg-slate-900 rounded-2xl flex items-center justify-center text-slate-500 group-hover:text-blue-400 group-hover:scale-110 transition-all duration-500 shadow-inner">
-                    <FileText className="w-6 h-6" />
+                  <div className="w-14 h-14 bg-slate-900 rounded-2xl flex items-center justify-center text-slate-500 group-hover:text-blue-400 group-hover:scale-110 transition-all duration-500 shadow-inner overflow-hidden relative">
+                    <FileText className="w-6 h-6 relative z-10" />
+                    <div className="absolute inset-0 bg-blue-500/10 opacity-0 group-hover:opacity-100 transition-opacity" />
                   </div>
                   <div className="text-left">
                     <p className="text-lg font-bold text-slate-200 group-hover:text-white transition-colors">{exam.title}</p>
                     <div className="flex items-center gap-3 mt-1">
                        <span className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">{new Date(exam.createdAt).toLocaleDateString()}</span>
                        <div className="w-1 h-1 rounded-full bg-slate-800" />
-                       <span className="text-[10px] font-mono text-blue-500 uppercase tracking-widest">Active</span>
+                       <span className="text-[10px] font-mono text-blue-500 uppercase tracking-widest">{stats.submissionsCountByExam?.[exam.id] || 0} SUBMISSIONS</span>
                     </div>
                   </div>
                 </div>
@@ -130,8 +181,8 @@ export const DashboardView = React.memo(({
         <div className="p-8 sm:p-10 rounded-[40px] bg-slate-900 border border-slate-800 shadow-2xl relative overflow-hidden">
           <div className="flex items-center justify-between mb-10">
             <div>
-              <h2 className="text-2xl font-display font-black text-white italic leading-tight">Upcoming Tasks</h2>
-              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Pending Review</p>
+              <h2 className="text-2xl font-display font-black text-white italic leading-tight">Action Items</h2>
+              <p className="text-xs text-slate-500 font-mono uppercase tracking-widest mt-1">Pending Grading</p>
             </div>
             <div className="px-3 py-1 bg-orange-500/10 border border-orange-500/20 rounded-lg">
                <span className="text-[10px] font-mono text-orange-400 uppercase tracking-widest">Tasks</span>
@@ -154,7 +205,7 @@ export const DashboardView = React.memo(({
                   onClick={() => onNavigate("submissions", sub.examId)}
                   className="px-5 py-2 bg-slate-800 text-slate-300 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-orange-500 hover:text-white transition-all shadow-lg"
                 >
-                  Process
+                  Grade
                 </button>
               </div>
             ))}
@@ -163,7 +214,7 @@ export const DashboardView = React.memo(({
                 <div className="w-20 h-20 bg-emerald-500/5 rounded-full flex items-center justify-center mb-6">
                   <CheckCircle className="w-10 h-10 text-emerald-500/40" />
                 </div>
-                <p className="text-sm font-bold uppercase tracking-widest text-slate-600">All Graded</p>
+                <p className="text-sm font-bold uppercase tracking-widest text-slate-600">All Clear</p>
                 <p className="text-xs mt-2 max-w-[180px] mx-auto text-slate-700 leading-relaxed">No student booklets are currently awaiting review.</p>
               </div>
             )}
@@ -172,9 +223,9 @@ export const DashboardView = React.memo(({
           <div className="mt-10 p-6 rounded-3xl bg-blue-600/10 border border-blue-500/10 group cursor-default">
              <div className="flex items-center gap-3 mb-2">
                 <BrainCircuit className="w-5 h-5 text-blue-400" />
-                <p className="text-xs font-black text-blue-400 uppercase tracking-widest">Grading Status</p>
+                <p className="text-xs font-black text-blue-400 uppercase tracking-widest">Cognitive State</p>
              </div>
-             <p className="text-xs text-slate-400 leading-relaxed group-hover:text-slate-300 transition-colors">The grading engine is ready to evaluate submissions.</p>
+             <p className="text-xs text-slate-400 leading-relaxed group-hover:text-slate-300 transition-colors">The AI grading engine is active and ready to interpret results.</p>
           </div>
         </div>
       </div>

@@ -15,7 +15,8 @@ import {
   CheckCircle,
   AlertCircle,
   Cpu,
-  X
+  X,
+  Activity
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Exam, Submission } from "../types";
@@ -27,6 +28,7 @@ export const SubmissionItem = React.memo(({
   submission, 
   onEvaluate,
   onDelete,
+  onPreview,
   isSelected,
   onToggleSelect,
   isOnline
@@ -34,6 +36,7 @@ export const SubmissionItem = React.memo(({
   submission: Submission; 
   onEvaluate: () => void;
   onDelete: () => void;
+  onPreview: (url: string, title: string) => void;
   isSelected?: boolean;
   onToggleSelect?: () => void;
   isOnline?: boolean;
@@ -132,16 +135,14 @@ export const SubmissionItem = React.memo(({
           {submission.status === "evaluated" ? "Review results" : "Grade"}
         </button>
       )}
-      <a 
-        href={submission.bookletUrl}
-        target={submission.bookletUrl.startsWith('data:') ? undefined : "_blank"}
-        rel="noopener noreferrer"
-        download={`Submission_${submission.studentName}.pdf`}
+      <button 
+        type="button"
+        onClick={() => onPreview(submission.bookletUrl, `Student Booklet: ${submission.studentName}`)}
         className="p-4 text-slate-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-2xl transition-all shadow-inner border border-transparent hover:border-blue-500/20"
-        title="Download File"
+        title="View Booklet"
       >
-        <Download className="w-5 h-5" />
-      </a>
+        <FileText className="w-5 h-5" />
+      </button>
       <button 
         type="button"
         onClick={(e) => { e.stopPropagation(); onDelete(); }}
@@ -165,6 +166,7 @@ export const SubmissionsView = React.memo(({
   onExportCSV,
   onDeleteSubmission,
   onBulkStatusUpdate,
+  onPreview,
   isEvaluating,
   isOnline
 }: { 
@@ -178,6 +180,7 @@ export const SubmissionsView = React.memo(({
   onExportCSV: () => void;
   onDeleteSubmission: (id: string | string[]) => void;
   onBulkStatusUpdate?: (ids: string[], status: "pending" | "evaluated") => void;
+  onPreview: (url: string, title: string) => void;
   isEvaluating: boolean;
   isOnline: boolean;
 }) => {
@@ -187,16 +190,6 @@ export const SubmissionsView = React.memo(({
   const filtered = submissions.filter(s => 
     s.studentName.toLowerCase().includes(searchQuery.toLowerCase())
   );
-
-  const stats = React.useMemo(() => {
-    const total = submissions.length;
-    const evaluated = submissions.filter(s => s.status === "evaluated").length;
-    const pending = total - evaluated;
-    const scores = submissions.filter(s => s.status === "evaluated").map(s => (s.totalMarks || 0) / (s.maxMarks || 1) * 100);
-    const avgScore = scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
-    
-    return { total, evaluated, pending, avgScore };
-  }, [submissions]);
 
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => 
@@ -240,20 +233,20 @@ export const SubmissionsView = React.memo(({
                      <div className="w-1 h-10 bg-blue-600 rounded-full" />
                      <div>
                         <h1 className="text-4xl font-display font-black text-white italic tracking-tighter leading-none">{exam?.title || "Exam Submissions"}</h1>
-                        <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Grading List</p>
+                        <p className="text-slate-500 font-mono text-[10px] uppercase tracking-[0.3em] mt-2">Analytical Session</p>
                      </div>
                   </div>
                   {exam && (
                     <div className="flex items-center gap-3 ml-4 sm:ml-0">
                       <button 
-                        onClick={() => window.open(exam.questionPaperUrl, '_blank')}
+                        onClick={() => onPreview(exam.questionPaperUrl, `${exam.title} - Question Paper`)}
                         className="flex items-center gap-2 px-4 py-2 bg-blue-500/10 border border-blue-500/20 rounded-xl text-[10px] font-black text-blue-400 uppercase tracking-widest hover:bg-blue-500 hover:text-white transition-all shadow-lg shadow-blue-500/5 active:scale-95"
                       >
                         <FileText className="w-3.5 h-3.5" />
                         View QP
                       </button>
                       <button 
-                        onClick={() => window.open(exam.markingSchemeUrl, '_blank')}
+                        onClick={() => onPreview(exam.markingSchemeUrl, `${exam.title} - Marking Scheme`)}
                         className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-[10px] font-black text-emerald-400 uppercase tracking-widest hover:bg-emerald-500 hover:text-white transition-all shadow-lg shadow-emerald-500/5 active:scale-95"
                       >
                         <CheckCircle className="w-3.5 h-3.5" />
@@ -262,7 +255,7 @@ export const SubmissionsView = React.memo(({
                     </div>
                   )}
                 </div>
-                <p className="text-slate-400 font-medium max-w-xl leading-relaxed text-sm">Grading student booklets for this exam.</p>
+                <p className="text-slate-400 font-medium max-w-xl leading-relaxed text-sm">Real-time performance analytics for this cohort.</p>
               </div>
         </div>
         
@@ -287,38 +280,19 @@ export const SubmissionsView = React.memo(({
               <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest leading-none group-hover:text-slate-300 transition-colors">Select All</span>
             </label>
           </div>
-          <div className="hidden sm:flex items-center gap-1 p-1.5 bg-slate-900 border border-slate-800 rounded-2xl">
-            {["Newest", "Name", "Score"].map((tab) => (
-              <button key={tab} className={cn(
-                "px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all",
-                tab === "Newest" ? "bg-blue-600/10 text-blue-400" : "text-slate-500 hover:text-slate-300"
-              )}>
-                {tab}
-              </button>
-            ))}
+          <div className="flex items-center gap-6 bg-slate-900/50 border border-slate-800 px-6 py-3 rounded-2xl backdrop-blur-xl shadow-xl">
+             <div className="text-right">
+                <p className="text-[9px] font-mono text-slate-600 uppercase tracking-widest">Auto-Update</p>
+                <p className="text-xs font-black text-blue-400 uppercase">Live Sync</p>
+             </div>
+             <div className="w-10 h-10 bg-blue-500/10 rounded-xl flex items-center justify-center border border-blue-500/20">
+                <Activity className="w-5 h-5 text-blue-500 animate-pulse" />
+             </div>
           </div>
         </div>
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-        {[
-          { label: "Total Students", value: stats.total, icon: Users, color: "text-blue-400", bg: "bg-blue-400/10" },
-          { label: "Booklets Processed", value: stats.evaluated, icon: CheckCircle, color: "text-emerald-400", bg: "bg-emerald-400/10" },
-          { label: "Grading Required", value: stats.pending, icon: AlertCircle, color: "text-orange-400", bg: "bg-orange-400/10" },
-          { label: "Average Score", value: `${stats.avgScore}%`, icon: BrainCircuit, color: "text-purple-400", bg: "bg-purple-400/10" },
-        ].map((item, i) => (
-          <div key={i} className="p-6 rounded-[32px] border border-slate-800/60 bg-slate-900/40 backdrop-blur-xl flex flex-col gap-4 group">
-            <div className={cn("w-12 h-12 rounded-2xl flex items-center justify-center border", item.bg, item.color.replace('text-', 'border-').replace('400', '500').concat('/20'))}>
-              <item.icon className="w-6 h-6 transition-transform duration-500 group-hover:scale-110" />
-            </div>
-            <div>
-              <p className="text-[10px] font-mono font-black text-slate-600 uppercase tracking-[0.2em] mb-1">{item.label}</p>
-              <p className="text-2xl font-black text-white leading-none">{item.value}</p>
-            </div>
-          </div>
-        ))}
-      </div>
+
 
       <AnimatePresence>
         {selectedIds.length > 0 && (
@@ -335,7 +309,7 @@ export const SubmissionsView = React.memo(({
                 </div>
                 <div>
                   <p className="text-xs font-black text-white uppercase tracking-widest">Selection</p>
-                  <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest mt-0.5">Bulk grading</p>
+                  <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest mt-0.5">Bulk actions</p>
                 </div>
               </div>
 
@@ -346,12 +320,7 @@ export const SubmissionsView = React.memo(({
                 >
                   Mark Final
                 </button>
-                <button 
-                  onClick={() => handleBulkStatus("pending")}
-                  className="px-5 py-3 bg-orange-600/10 border border-orange-500/10 text-orange-400 text-[10px] font-black uppercase tracking-widest rounded-2xl hover:bg-orange-600 hover:text-white transition-all outline-none"
-                >
-                  Reset Status
-                </button>
+                <div className="w-px h-8 bg-slate-800 mx-2" />
                 <button 
                   onClick={() => onDeleteSubmission(selectedIds)}
                   className="p-3 text-slate-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-2xl transition-all"
@@ -359,7 +328,6 @@ export const SubmissionsView = React.memo(({
                 >
                   <Trash2 className="w-5 h-5" />
                 </button>
-                <div className="w-px h-8 bg-slate-800 mx-2" />
                 <button 
                   onClick={() => setSelectedIds([])}
                   className="p-3 text-slate-500 hover:text-white bg-slate-900 rounded-2xl border border-slate-800 transition-colors"
@@ -392,7 +360,7 @@ export const SubmissionsView = React.memo(({
               className="w-full sm:w-auto h-14 px-10 bg-blue-600 text-white font-black uppercase tracking-widest text-[10px] rounded-[22px] hover:bg-blue-500 transition-all flex items-center justify-center gap-3 whitespace-nowrap shadow-xl shadow-blue-500/10 active:scale-95"
             >
               <Plus className="w-5 h-5" />
-              New Record
+              New Entry
             </button>
           </div>
           
@@ -402,6 +370,7 @@ export const SubmissionsView = React.memo(({
                 key={sub.id} 
                 submission={sub} 
                 isOnline={isOnline}
+                onPreview={onPreview}
                 onEvaluate={() => onSingleEvaluate(sub)} 
                 onDelete={() => onDeleteSubmission(sub.id!)} 
                 isSelected={selectedIds.includes(sub.id!)}
@@ -414,10 +383,10 @@ export const SubmissionsView = React.memo(({
                   <FileText className="w-12 h-12 opacity-20" />
                 </div>
                 <p className="text-xl font-bold text-slate-400 italic">
-                  {searchQuery ? "No matching records found." : "Submission list is empty."}
+                  {searchQuery ? "No matching records found." : "Record list is empty."}
                 </p>
                 <p className="text-xs uppercase font-mono tracking-widest mt-3 text-slate-600">
-                   Ready for uploads.
+                   Awaiting document stream.
                 </p>
               </div>
             )}
@@ -430,7 +399,7 @@ export const SubmissionsView = React.memo(({
             <div className="absolute top-0 right-0 p-6 opacity-[0.03] group-hover:opacity-[0.05] transition-opacity pointer-events-none rotate-12">
                <Cpu className="w-48 h-48" />
             </div>
-            <h4 className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.3em] mb-8 px-1">Actions</h4>
+            <h4 className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-[0.3em] mb-8 px-1">Control Plane</h4>
             <div className="space-y-4">
               <button 
                 onClick={onBulkEvaluate}
@@ -441,8 +410,8 @@ export const SubmissionsView = React.memo(({
                   {isEvaluating ? <Loader2 className="w-6 h-6 animate-spin" /> : <Sparkles className="w-6 h-6" />}
                 </div>
                 <div className="text-left">
-                  <p className="text-xs uppercase tracking-widest">Grade All</p>
-                  <p className="text-[10px] text-blue-200/50 font-mono mt-1">AI Automated</p>
+                  <p className="text-xs uppercase tracking-widest">Evaluate Set</p>
+                  <p className="text-[10px] text-blue-200/50 font-mono mt-1">AI Logic Engine</p>
                 </div>
               </button>
               
@@ -455,8 +424,8 @@ export const SubmissionsView = React.memo(({
                   <Upload className="w-6 h-6" />
                 </div>
                 <div className="text-left">
-                  <p className="text-xs uppercase tracking-widest">Bulk Upload</p>
-                  <p className="text-[10px] text-slate-600 font-mono mt-1">ZIP / Files</p>
+                  <p className="text-xs uppercase tracking-widest">Bulk Ingest</p>
+                  <p className="text-[10px] text-slate-600 font-mono mt-1">Filesystem Sync</p>
                 </div>
               </button>
               
@@ -468,8 +437,8 @@ export const SubmissionsView = React.memo(({
                   <Download className="w-6 h-6" />
                 </div>
                 <div className="text-left">
-                  <p className="text-xs uppercase tracking-widest">Export Grades</p>
-                  <p className="text-[10px] text-emerald-600/40 font-mono mt-1">CSV Format</p>
+                  <p className="text-xs uppercase tracking-widest">Dataset Export</p>
+                  <p className="text-[10px] text-emerald-600/40 font-mono mt-1">Spreadsheet</p>
                 </div>
               </button>
             </div>
@@ -479,8 +448,8 @@ export const SubmissionsView = React.memo(({
              <div className="w-20 h-20 bg-indigo-600/10 rounded-3xl flex items-center justify-center mb-6 border border-indigo-500/20 group-hover:scale-110 transition-transform duration-700">
                 <BrainCircuit className="w-10 h-10 text-indigo-400" />
              </div>
-             <p className="text-xs font-black text-indigo-400 uppercase tracking-[0.2em] mb-4">AI Ready</p>
-             <p className="text-xs text-slate-500 leading-relaxed max-w-[200px]">The AI is ready to grade uploaded student booklets.</p>
+             <p className="text-xs font-black text-indigo-400 uppercase tracking-[0.2em] mb-4">Neural Link</p>
+             <p className="text-xs text-slate-500 leading-relaxed max-w-[200px]">Real-time synchronization active for all student assessments.</p>
           </div>
         </div>
       </div>

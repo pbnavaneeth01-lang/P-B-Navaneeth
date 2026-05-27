@@ -9,6 +9,7 @@ import { getFirestore, doc, setDoc, getDoc, collection, addDoc, query, where, or
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import firebaseConfig from "../firebase-applet-config.json";
 import { Exam, Submission } from "./types";
+import { safeJsonStringify } from "./lib/utils";
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
@@ -89,7 +90,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   };
   
   try {
-    const serialized = JSON.stringify(errInfo);
+    const serialized = safeJsonStringify(errInfo);
     console.error('Firestore Error:', serialized);
     throw new Error(serialized);
   } catch (e) {

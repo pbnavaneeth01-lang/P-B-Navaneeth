@@ -153,3 +153,14 @@ export const Toast = ({ message, type, onClose }: ToastProps) => {
     </motion.div>
   );
 };
+
+export const Skeleton = ({ className, repeat = 1 }: { className?: string; repeat?: number }) => (
+  <>
+    {Array.from({ length: repeat }).map((_, i) => (
+      <div 
+        key={i} 
+        className={cn("animate-pulse bg-slate-800/50 rounded-2xl", className)} 
+      />
+    ))}
+  </>
+);

@@ -6,8 +6,13 @@ const DB_NAME = "grademaster_offline_storage";
 const STORE_NAME = "files";
 const DB_VERSION = 1;
 
+let dbPromise: Promise<IDBDatabase> | null = null;
+const objectUrlCache = new Map<string, string>();
+
 export const openDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  
+  dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -16,17 +21,27 @@ export const openDB = (): Promise<IDBDatabase> => {
       }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onerror = (e) => {
+      dbPromise = null;
+      reject(request.error);
+    };
   });
+  
+  return dbPromise;
 };
 
 export const storeFile = async (id: string, file: File | Blob): Promise<string> => {
+  // Revoke old URL if overwriting
+  const cachedUrl = objectUrlCache.get(id);
+  if (cachedUrl) {
+    URL.revokeObjectURL(cachedUrl);
+    objectUrlCache.delete(id);
+  }
+  
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
-    // Explicitly check for large files and handle potential IDB limits if necessary
-    // But 100MB is usually fine for IDB
     const request = store.put(file, id);
     request.onsuccess = () => resolve(id);
     request.onerror = (e) => {
@@ -48,6 +63,11 @@ export const getFileBlob = async (id: string): Promise<Blob | null> => {
 };
 
 export const getFileUrl = async (id: string): Promise<string> => {
+  // Return cached URL immediately if it exists, avoiding duplicate creation and memory leaks
+  if (objectUrlCache.has(id)) {
+    return objectUrlCache.get(id)!;
+  }
+
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, "readonly");
@@ -55,7 +75,9 @@ export const getFileUrl = async (id: string): Promise<string> => {
     const request = store.get(id);
     request.onsuccess = () => {
       if (request.result) {
-        resolve(URL.createObjectURL(request.result));
+        const url = URL.createObjectURL(request.result);
+        objectUrlCache.set(id, url);
+        resolve(url);
       } else {
         reject(new Error("File not found in local storage"));
       }
@@ -65,6 +87,12 @@ export const getFileUrl = async (id: string): Promise<string> => {
 };
 
 export const deleteFile = async (id: string): Promise<void> => {
+  const cachedUrl = objectUrlCache.get(id);
+  if (cachedUrl) {
+    URL.revokeObjectURL(cachedUrl);
+    objectUrlCache.delete(id);
+  }
+
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, "readwrite");
@@ -76,6 +104,9 @@ export const deleteFile = async (id: string): Promise<void> => {
 };
 
 export const clearAllFiles = async (): Promise<void> => {
+  objectUrlCache.forEach(url => URL.revokeObjectURL(url));
+  objectUrlCache.clear();
+
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, "readwrite");
