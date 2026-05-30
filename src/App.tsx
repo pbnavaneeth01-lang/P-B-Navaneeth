@@ -34,7 +34,9 @@ import {
   Settings,
   User as UserIcon,
   Camera,
-  Folders
+  Folders,
+  Mail,
+  Lock
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useDropzone } from "react-dropzone";
@@ -82,7 +84,7 @@ const AboutView = React.lazy(() => import("./components/AboutView").then(m => ({
 import { PdfViewer } from "./components/PdfViewer";
 import { AIEngineStatus } from "./components/AIEngineStatus";
 
-import { auth, db, storage, signInWithGoogle, logout, createExam, updateExam, deleteExam, createSubmission, updateSubmission, deleteSubmission, handleFirestoreError, OperationType, testConnection } from "./firebase";
+import { auth, db, storage, signInWithGoogle, signUpWithEmail, logInWithEmail, logout, createExam, updateExam, deleteExam, createSubmission, updateSubmission, deleteSubmission, handleFirestoreError, OperationType, testConnection } from "./firebase";
 import { ref, uploadBytes, getDownloadURL, uploadBytesResumable } from "firebase/storage";
 import { cn, fileToBase64, fixHtml2CanvasOklch, safeJsonStringify } from "./lib/utils";
 import { Exam, Submission, AppFeature, EvaluationQuestion } from "./types";
@@ -505,6 +507,9 @@ export default function App() {
 
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authMethod, setAuthMethod] = useState<'google' | 'email'>('google');
+  const [emailMode, setEmailMode] = useState<'login' | 'signup'>('login');
+  const [emailForm, setEmailForm] = useState({ email: '', password: '', displayName: '' });
   const [nativeFolderHandle, setNativeFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [isNativeStorageEnabled, setIsNativeStorageEnabled] = useState(false);
   const [isLocalCacheEnabled, setIsLocalCacheEnabled] = useState<boolean | null>(() => {
@@ -1944,71 +1949,253 @@ export default function App() {
                <p className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.4em]">Grading Platform</p>
                <div className="h-px w-8 bg-slate-800" />
             </div>
-          </div>
-
-          <div className="bg-slate-900/40 backdrop-blur-2xl border border-slate-800/60 rounded-[48px] p-10 space-y-8 shadow-[0_40px_100px_rgba(0,0,0,0.6)] relative overflow-hidden technical-border">
+                <div className="bg-slate-900/40 backdrop-blur-2xl border border-slate-800/60 rounded-[48px] p-10 space-y-6 shadow-[0_40px_100px_rgba(0,0,0,0.6)] relative overflow-hidden technical-border max-w-md w-full mx-auto">
             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent" />
             
-            <div className="space-y-2 text-center">
-              <p className="text-slate-400 font-medium leading-relaxed">
-                Log in to access your student booklets and grading.
+            <div className="space-y-1 text-center">
+              <p className="text-slate-400 font-medium text-sm leading-relaxed">
+                Choose authentication method to access GradeMaster.
               </p>
+            </div>
+
+            {/* Tab Toggles */}
+            <div className="grid grid-cols-2 p-1.5 bg-slate-950/60 rounded-2xl border border-slate-800/50">
+              <button 
+                type="button"
+                onClick={() => {
+                  setAuthMethod('google');
+                  setAuthError(null);
+                }}
+                className={cn(
+                  "py-2.5 px-4 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
+                  authMethod === 'google' 
+                    ? "bg-white text-black shadow-md" 
+                    : "text-slate-400 hover:text-slate-200"
+                )}
+              >
+                Google Auth
+              </button>
+              <button 
+                type="button"
+                onClick={() => {
+                  setAuthMethod('email');
+                  setAuthError(null);
+                }}
+                className={cn(
+                  "py-2.5 px-4 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
+                  authMethod === 'email' 
+                    ? "bg-white text-black shadow-md" 
+                    : "text-slate-400 hover:text-slate-200"
+                )}
+              >
+                Email & Pass
+              </button>
             </div>
 
             {authError && (
               <motion.div 
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="p-5 bg-rose-500/5 border border-rose-500/20 rounded-2xl flex items-start gap-4 text-rose-400 text-xs font-bold leading-relaxed"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="p-4 bg-rose-500/5 border border-rose-500/10 rounded-2xl flex items-start gap-3.5 text-rose-400 text-xs leading-relaxed"
               >
                 <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <p className="uppercase tracking-widest text-[10px]">Error</p>
-                  <p className="font-medium opacity-80">{authError}</p>
+                <div className="space-y-1 flex-1">
+                  <p className="uppercase tracking-widest text-[9px] font-mono font-bold text-rose-500">Error</p>
+                  {authError === "unauthorized-domain" ? (
+                    <div className="space-y-2.5 text-left">
+                      <p className="font-bold text-rose-300">Auth Domain Whwhitelist Needed</p>
+                      <p className="font-normal opacity-90 text-slate-300 text-[11px]">
+                        The dynamic AI Studio Google client requires authorization.
+                      </p>
+                      <div className="bg-slate-950/80 rounded-xl p-3 space-y-2 text-slate-400 font-normal border border-slate-800/40 text-[11px]">
+                        <p className="font-bold text-slate-300">Instant Fix options:</p>
+                        <ul className="list-disc pl-4 space-y-1 text-slate-400">
+                          <li>Click the <span className="font-semibold text-slate-200">Email & Pass</span> tab above to register / login instantly!</li>
+                          <li>Or use <span className="font-semibold text-slate-200">Continue as Guest</span> below.</li>
+                        </ul>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="font-medium opacity-80">{authError}</p>
+                  )}
                 </div>
               </motion.div>
             )}
 
-            <button
-              onClick={async () => {
-                if (isSigningIn) return;
-                setIsSigningIn(true);
-                setAuthError(null);
-                try {
-                  await signInWithGoogle();
-                } catch (err: any) {
-                  console.error(err);
-                  if (err.code === 'auth/cancelled-popup-request') {
-                    setAuthError("A sign-in request is already pending.");
-                  } else if (err.code === 'auth/popup-closed-by-user') {
-                    setAuthError("Sign-in process interrupted.");
-                  } else if (err.code === 'auth/blocked-by-popup-blocker') {
-                    setAuthError("Popup blocked. Please adjust browser settings.");
-                  } else {
-                    setAuthError(err.message || "Credential verification failed.");
+            {/* Tab content: Google */}
+            {authMethod === 'google' && (
+              <div className="space-y-4">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (isSigningIn) return;
+                    setIsSigningIn(true);
+                    setAuthError(null);
+                    try {
+                      await signInWithGoogle();
+                    } catch (err: any) {
+                      console.error(err);
+                      if (err.code === 'auth/cancelled-popup-request') {
+                        setAuthError("A sign-in request is already pending.");
+                      } else if (err.code === 'auth/popup-closed-by-user') {
+                        setAuthError("Sign-in process interrupted.");
+                      } else if (err.code === 'auth/blocked-by-popup-blocker') {
+                        setAuthError("Popup blocked. Please adjust browser settings.");
+                      } else if (err.code === 'auth/unauthorized-domain' || (err.message && err.message.includes('unauthorized-domain'))) {
+                        setAuthError("unauthorized-domain");
+                      } else {
+                        setAuthError(err.message || "Credential verification failed.");
+                      }
+                    } finally {
+                      setIsSigningIn(false);
+                    }
+                  }}
+                  disabled={isSigningIn}
+                  className="w-full h-16 bg-white text-black font-black uppercase tracking-[0.2em] text-[11px] rounded-[24px] flex items-center justify-center gap-3.5 hover:bg-slate-100 transition-all active:scale-[0.98] shadow-2xl disabled:opacity-50 disabled:cursor-not-allowed group"
+                >
+                  {isSigningIn ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <>
+                      <div className="w-6 h-6 bg-slate-950 rounded-lg flex items-center justify-center group-hover:scale-110 transition-transform">
+                        <LogIn className="w-3.5 h-3.5 text-white" />
+                      </div>
+                      <span>Log in with Google</span>
+                    </>
+                  )}
+                </button>
+                <p className="text-[10px] text-center text-slate-500 font-medium">
+                  Using self-hosting like Vercel? Register via the <span className="font-semibold text-slate-400">Email & Pass</span> tab.
+                </p>
+              </div>
+            )}
+
+            {/* Tab content: Email Form */}
+            {authMethod === 'email' && (
+              <form 
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (isSigningIn) return;
+                  if (!emailForm.email || !emailForm.password) {
+                    setAuthError("Please fill in both email and password.");
+                    return;
                   }
-                } finally {
-                  setIsSigningIn(false);
-                }
-              }}
-              disabled={isSigningIn}
-              className="w-full h-20 bg-white text-black font-black uppercase tracking-[0.2em] text-[12px] rounded-[28px] flex items-center justify-center gap-4 hover:bg-slate-100 transition-all active:scale-[0.98] shadow-2xl shadow-blue-500/5 disabled:opacity-50 disabled:cursor-not-allowed group mb-4"
-            >
-              {isSigningIn ? (
-                <Loader2 className="w-6 h-6 animate-spin" />
-              ) : (
-                <>
-                  <div className="w-8 h-8 bg-slate-950 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
-                    <LogIn className="w-4 h-4 text-white" />
+                  if (emailMode === 'signup' && !emailForm.displayName) {
+                    setAuthError("Please enter your name.");
+                    return;
+                  }
+                  setIsSigningIn(true);
+                  setAuthError(null);
+                  try {
+                    if (emailMode === 'login') {
+                      await logInWithEmail(emailForm.email, emailForm.password);
+                    } else {
+                      await signUpWithEmail(emailForm.email, emailForm.password, emailForm.displayName);
+                    }
+                  } catch (err: any) {
+                    console.error("Email auth error:", err);
+                    if (err.code === 'auth/email-already-in-use') {
+                      setAuthError("This email address is already in use.");
+                    } else if (err.code === 'auth/weak-password') {
+                      setAuthError("Password is too weak. Must be at least 6 characters.");
+                    } else if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
+                      setAuthError("Invalid email or password combination.");
+                    } else if (err.code === 'auth/invalid-email') {
+                      setAuthError("Please enter a valid email address.");
+                    } else {
+                      setAuthError(err.message || "Authentication process failed.");
+                    }
+                  } finally {
+                    setIsSigningIn(false);
+                  }
+                }}
+                className="space-y-4 text-left"
+              >
+                {emailMode === 'signup' && (
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-mono text-slate-400 uppercase tracking-wider block">Full Name</label>
+                    <div className="relative">
+                      <UserIcon className="w-4 h-4 text-slate-500 absolute left-4 top-1/2 -translate-y-1/2" />
+                      <input 
+                        type="text" 
+                        required
+                        placeholder="Dr. Educator"
+                        value={emailForm.displayName}
+                        onChange={(e) => setEmailForm({ ...emailForm, displayName: e.target.value })}
+                        className="w-full bg-slate-950/80 border border-slate-800 focus:border-blue-500 rounded-xl py-3 pl-11 pr-4 text-sm text-slate-200 outline-none transition-colors"
+                      />
+                    </div>
                   </div>
-                  <span>Log in with Google</span>
-                </>
-              )}
-            </button>
+                )}
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-mono text-slate-400 uppercase tracking-wider block">Email Address</label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-500 absolute left-4 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="email" 
+                      required
+                      placeholder="admin@school.edu"
+                      value={emailForm.email}
+                      onChange={(e) => setEmailForm({ ...emailForm, email: e.target.value })}
+                      className="w-full bg-slate-950/80 border border-slate-800 focus:border-blue-500 rounded-xl py-3 pl-11 pr-4 text-sm text-slate-200 outline-none transition-colors"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-mono text-slate-400 uppercase tracking-wider block">Password</label>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-500 absolute left-4 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="password" 
+                      required
+                      placeholder="••••••••"
+                      value={emailForm.password}
+                      onChange={(e) => setEmailForm({ ...emailForm, password: e.target.value })}
+                      className="w-full bg-slate-950/80 border border-slate-800 focus:border-blue-500 rounded-xl py-3 pl-11 pr-4 text-sm text-slate-200 outline-none transition-colors"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSigningIn}
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white font-bold rounded-xl transition-all font-mono uppercase text-xs tracking-widest flex items-center justify-center gap-2 mt-2"
+                >
+                  {isSigningIn ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <span>{emailMode === 'login' ? 'Sign In' : 'Create Account'}</span>
+                  )}
+                </button>
+
+                <div className="text-center pt-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailMode(emailMode === 'login' ? 'signup' : 'login');
+                      setAuthError(null);
+                    }}
+                    className="text-[11px] text-blue-400 hover:underline hover:text-blue-300 font-semibold"
+                  >
+                    {emailMode === 'login' 
+                      ? "Don't have an account? Sign Up" 
+                      : "Already have an account? Log In"}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <div className="relative flex py-2 items-center">
+              <div className="flex-grow border-t border-slate-800/60"></div>
+              <span className="flex-shrink mx-4 text-[10px] text-slate-600 font-mono tracking-widest uppercase">Or</span>
+              <div className="flex-grow border-t border-slate-800/60"></div>
+            </div>
 
             <button
+              type="button"
               onClick={() => {
-                // Set a mock user for guest mode
                 const guestUser = {
                   uid: "guest_" + Math.random().toString(36).substring(2, 9),
                   displayName: "Guest Educator",
@@ -2020,21 +2207,42 @@ export default function App() {
                 setLoading(false);
                 localStorage.setItem("grademaster_is_guest", "true");
               }}
-              className="w-full py-4 border-2 border-slate-800 text-slate-400 font-bold uppercase tracking-widest text-[10px] rounded-2xl hover:bg-slate-800 hover:text-white transition-all active:scale-[0.98]"
+              className="w-full py-3.5 border-2 border-slate-800 text-slate-400 font-semibold uppercase tracking-widest text-[9px] rounded-2xl hover:bg-slate-800 hover:text-white transition-all active:scale-[0.98]"
             >
               Continue as Guest (Offline Mode)
             </button>
             
-            <div className="pt-4 flex flex-col items-center gap-4">
+            {/* Vercel production deployment guides */}
+            <details className="text-left bg-slate-950/40 border border-slate-800/50 rounded-2xl p-4.5 transition-all group overflow-hidden">
+              <summary className="list-none flex items-center justify-between cursor-pointer text-slate-500 hover:text-slate-300 select-none">
+                <span className="text-[10px] font-mono uppercase tracking-widest">Self-Hosting Config (Vercel)</span>
+                <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90 text-slate-500" />
+              </summary>
+              <div className="mt-3.5 space-y-3 pt-3 border-t border-slate-900 text-slate-400 font-normal leading-relaxed text-[11px]">
+                <p>
+                  You are hosting on <code className="text-blue-400">grademasterai.vercel.app</code>. To link your own permanent database and custom whitelists, define the following variables under Settings in your Vercel Dashboard:
+                </p>
+                <div className="bg-slate-950 rounded-xl p-3 font-mono text-[10px] text-slate-300 leading-normal space-y-1 block border border-slate-900">
+                  <p>VITE_FIREBASE_API_KEY=<span className="text-slate-500">YOUR_API_KEY</span></p>
+                  <p>VITE_FIREBASE_AUTH_DOMAIN=<span className="text-slate-500">YOUR_AUTH_DOMAIN</span></p>
+                  <p>VITE_FIREBASE_PROJECT_ID=<span className="text-slate-500">YOUR_PROJECT_ID</span></p>
+                  <p>VITE_FIREBASE_STORAGE_BUCKET=<span className="text-slate-500">YOUR_BUCKET</span></p>
+                  <p>VITE_FIREBASE_MESSAGING_SENDER_ID=<span className="text-slate-500">SENDER_ID</span></p>
+                  <p>VITE_FIREBASE_APP_ID=<span className="text-slate-500">YOUR_APP_ID</span></p>
+                </div>
+                <p className="text-slate-500 leading-tight">
+                  Once set, your Vercel deployment connects directly to your own secure database and supports standard Google login flows!
+                </p>
+              </div>
+            </details>
+
+            <div className="pt-2 flex flex-col items-center gap-3">
                <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-blue-500/50" />
-                  <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">Secure Connection</p>
+                  <ShieldCheck className="w-3.5 h-3.5 text-blue-500/50" />
+                  <p className="text-[9px] font-mono text-slate-600 uppercase tracking-widest">Secure TLS / SSL Connection</p>
                </div>
-               <p className="text-[10px] text-center text-slate-700 font-mono uppercase tracking-tighter max-w-[200px]">
-                 Secure login for academic use.
-               </p>
             </div>
-          </div>
+          </div>      </div>
           
           <motion.p 
             initial={{ opacity: 0 }}

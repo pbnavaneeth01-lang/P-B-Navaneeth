@@ -4,6 +4,9 @@ import {
   GoogleAuthProvider, 
   signInWithPopup, 
   signOut, 
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  updateProfile,
 } from "firebase/auth";
 import { getFirestore, doc, setDoc, getDoc, collection, addDoc, query, where, orderBy, onSnapshot, updateDoc, deleteDoc, getDocFromServer, enableIndexedDbPersistence, serverTimestamp, Timestamp, FieldValue } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
@@ -11,9 +14,23 @@ import firebaseConfig from "../firebase-applet-config.json";
 import { Exam, Submission } from "./types";
 import { safeJsonStringify } from "./lib/utils";
 
-const app = initializeApp(firebaseConfig);
+// Try to load custom environment variables (useful for external hosting like Vercel)
+// fallback to build-time local config from firebase-applet-config.json
+const config = {
+  apiKey: (import.meta.env.VITE_FIREBASE_API_KEY as string) || firebaseConfig.apiKey,
+  authDomain: (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string) || firebaseConfig.authDomain,
+  projectId: (import.meta.env.VITE_FIREBASE_PROJECT_ID as string) || firebaseConfig.projectId,
+  storageBucket: (import.meta.env.VITE_FIREBASE_STORAGE_BUCKET as string) || firebaseConfig.storageBucket,
+  messagingSenderId: (import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID as string) || firebaseConfig.messagingSenderId,
+  appId: (import.meta.env.VITE_FIREBASE_APP_ID as string) || firebaseConfig.appId,
+  measurementId: (import.meta.env.VITE_FIREBASE_MEASUREMENT_ID as string) || (firebaseConfig as any).measurementId || "",
+};
+
+const databaseId = (import.meta.env.VITE_FIREBASE_FIRESTORE_DB_ID as string) || firebaseConfig.firestoreDatabaseId;
+
+const app = initializeApp(config);
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app, databaseId);
 
 // Enable offline persistence
 try {
@@ -143,6 +160,38 @@ export const signInWithGoogle = async () => {
     return result.user;
   } catch (error) {
     console.error("Error signing in with Google:", error);
+    throw error;
+  }
+};
+
+export const signUpWithEmail = async (email: string, password: string, displayName: string) => {
+  try {
+    console.log("Initiating Email sign up for:", email);
+    const result = await createUserWithEmailAndPassword(auth, email, password);
+    if (displayName) {
+      await updateProfile(result.user, { displayName });
+    }
+    console.log("Sign up successful, syncing profile...");
+    await syncUserProfile({
+      ...result.user,
+      displayName: displayName || result.user.displayName
+    });
+    return result.user;
+  } catch (error) {
+    console.error("Error signing up with Email:", error);
+    throw error;
+  }
+};
+
+export const logInWithEmail = async (email: string, password: string) => {
+  try {
+    console.log("Initiating Email sign in for:", email);
+    const result = await signInWithEmailAndPassword(auth, email, password);
+    console.log("Sign in successful, syncing profile...");
+    await syncUserProfile(result.user);
+    return result.user;
+  } catch (error) {
+    console.error("Error logging in with Email:", error);
     throw error;
   }
 };
