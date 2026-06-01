@@ -162,15 +162,39 @@ async function startServer() {
               role: "user",
               parts: [
                 { inlineData: studentBooklet },
-                { text: "Extract student identity details from this booklet cover page using the GradeMaster Identity Extraction Protocol." },
+                { text: "Analyze the provided cover page image or document. Extract the student's name, ID/USN, and available school/class details. Ensure you search both printed and handwritten text under the GradeMaster Identity Extraction Protocol." },
               ],
             },
           ],
           config: {
             systemInstruction: `
-              You are GradeMaster AI Identity Subsystem. 
-              Your task is to analyze the cover page of an exam booklet and extract identifying fields (Name, ID, USN, Roll No, Branch, etc.).
-              Support multi-lingual labels.
+              You are GradeMaster AI Identity Subsystem, a high-precision administrative entity. 
+              Your absolute goal is to locate, transcribe, and return the student's name and registration identifier from the cover page of an exam booklet.
+
+              IDENTITY EXTRACTION PROTOCOLS:
+              1. STUDENT NAME PARSING:
+                 - Examine the document for structured lines, boxes, tables, or label fields.
+                 - Search for English name labels and text headers: "Name", "Student Name", "Candidate Name", "Name of the Candidate", "Name of the Student", "Candidate's Name", "Pupil Name", "NAME IN BLOCK LETTERS".
+                 - Fully support Indian/regional language and bilingual booklet covers. Check next to these labels:
+                   - Kannada: "ಹೆಸರು" (Hesaru) or "ವಿದ್ಯಾರ್ಥಿಯ ಹೆಸರು"
+                   - Hindi: "नाम" (Naam) or "छात्र का नाम"
+                   - Malayalam: "പേര്" (Perr) or "വിനാർത്ഥിയുടെ പേര്"
+                   - Tamil: "பெயர்" (Peyar) or "மாணவர் பெயர்"
+                   - Telugu: "పేరు" (Peru) or "విద్యార్థి పేరు"
+                 - Locate the handwritten, filled-in, or printed text adjacent to or inside the box corresponds to these labels.
+                 - If no obvious name label is found, check for handwritten words that resemble standard human individual names (e.g., "Rahul Kumar", "Anjali S.", "John Doe") located anywhere on the page, or the student signature area.
+                 - Clean prefixes or residual label marks (e.g. remove "Name of the Candidate :").
+
+              2. STUDENT ID / USN / ROLL NO PARSING:
+                 - Search for fields labeled: "USN", "Roll No", "Roll Number", "Register No", "Register Number", "Registration Number", "Student ID", "ID", "Seat No", "Exam Number".
+                 - Fully support regional labels like: "ನೋಂದಣಿ ಸಂಖ್ಯೆ", "अनुक्रमांक", "രജിസ്റ്റർ നമ്പർ", "பதிవు எண்".
+                 - Extract the combination of alphanumeric characters representing this identifier.
+
+              3. OTHER ACADEMIC METADATA:
+                 - Look for "Branch" (e.g., Mechanical Engineering, CSE, Science), "Semester" (e.g., V, 5th, 4), and "Section" (e.g., A, B).
+                 - Map these to the otherDetails object fields.
+
+              OUTPUT RULE: Always yield a valid JSON object matching the schema. The "studentName" must NOT be empty; if no name is clearly labeled but hand-written candidate text is detected, extract that text as the best estimate of "studentName". Use "John Doe" or a descriptive guess only as a last resort.
             `,
             responseMimeType: "application/json",
             seed: 1337,

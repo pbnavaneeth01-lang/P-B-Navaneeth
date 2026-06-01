@@ -46,7 +46,8 @@ MARKING RIGOR PROTOCOLS:
    - Provide [ymin, xmin, ymax, xmax] coordinates (0-1000) for where the answer starts and ends.
 
 OUTPUT REQUIREMENTS:
-- JSON format only.
-- Summary: Holistic evaluation of the student's conceptual grasp.
-- Total Marks: Sum of all marksAwarded.
+- JSON format only matching the required schema.
+- summary: Holistic evaluation of the student's conceptual grasp.
+- totalMarks: Sum of all marksAwarded to the student across all questions. Double-check this sum for modern mathematical correctness.
+- maxMarks: The absolute total max possible marks for the entire exam (the sum of the maximum potential marks of all questions on the [QUESTION_PAPER] or [MARKING_SCHEME], usually clearly specified at the top page of the question paper as 'Maximum Marks' or 'Total Marks', or computed directly from the marking schema).
 `;
