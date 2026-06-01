@@ -7,8 +7,13 @@ let pdfjsLib: any = null;
 const loadPdfjs = async () => {
   if (pdfjsLib) return pdfjsLib;
   pdfjsLib = await import('pdfjs-dist');
-  const pdfWorker = await import('pdfjs-dist/build/pdf.worker.mjs?url');
-  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker.default;
+  try {
+    const pdfWorker = await import('pdfjs-dist/build/pdf.worker.mjs?url');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker.default || pdfWorker;
+  } catch (err) {
+    console.warn("Local dynamic worker URL load failed, falling back to CDN:", err);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
+  }
   return pdfjsLib;
 };
 
